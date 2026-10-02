@@ -23,20 +23,33 @@ export function LibraryPage() {
     cta = { href: `/chapter/${firstUnread.slug}`, label: started ? 'Read the next chapter' : 'Begin reading', detail: `Chapter ${chapterNumber(firstUnread.number)} · ${firstUnread.title}` };
   }
 
+  // The masthead sets the name as "Dusk — Shingle" with a hairline between the
+  // two words. The library sets the same name at title size, so the wordmark,
+  // the title page and the chapter threshold all speak one language. Split on
+  // the first space only, and fall back to plain text if the name is one word.
+  const [head, ...tail] = publication.title.split(' ');
+  const rest = tail.join(' ');
+
   return (
     <main id="main" className="library">
       <section className="library-intro page" aria-labelledby="library-title">
-        <p className="meta-label">{publication.editionLabel} · {publication.statusLabel}</p>
-        <h1 id="library-title" className="library-title">Dusk Shingle</h1>
-        <p className="library-lede">{publication.description}</p>
-        {cta ? (
-          <div className="library-cta">
-            <Link className="btn btn-primary" href={cta.href}>{cta.label}<Icon name="arrow-right" /></Link>
-            <span className="meta">{cta.detail}</span>
-          </div>
-        ) : chapters.length > 0 ? (
-          <p className="library-cta meta">You have read every published chapter. The next will appear here.</p>
-        ) : null}
+        <div className="library-head">
+          <p className="meta-label">{publication.editionLabel} · {publication.statusLabel}</p>
+          <h1 id="library-title" className="library-title">
+            {/* The space keeps the accessible name "Dusk Shingle" rather than
+                "DuskShingle" once the rule between the two is stripped out. */}
+            {rest ? <><span>{head}</span> <i className="library-horizon" aria-hidden="true" /><span>{rest}</span></> : head}
+          </h1>
+          <p className="library-lede">{publication.description}</p>
+          {cta ? (
+            <div className="library-cta">
+              <Link className="btn btn-primary" href={cta.href}>{cta.label}<Icon name="arrow-right" /></Link>
+              <span className="meta">{cta.detail}</span>
+            </div>
+          ) : chapters.length > 0 ? (
+            <p className="library-cta meta">You have read every published chapter. The next will appear here.</p>
+          ) : null}
+        </div>
       </section>
 
       <section className="contents page" aria-labelledby="contents-title">
