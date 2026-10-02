@@ -1,3 +1,12 @@
+---
+title: "Dusk Shingle"
+type: project
+status: active
+project: "dusk-shingle"
+tags: [project, web-app, react, postgres, e2ee, vercel]
+created: "2026-09-19"
+---
+
 # Dusk Shingle
 
 A quiet, reader-facing publication surface for *Dusk Shingle*.
@@ -12,9 +21,26 @@ npm run dev        # API (server/dev.ts, on-disk PGlite in .data/) + Vite on :51
 ## Architecture
 
 Vite + React SPA with one Vercel Function (`api/router.ts`) backed by Postgres. Anonymous accounts (a single
-browser-generated reader key, no identity data), end-to-end encrypted reading-state sync, chapter discussions
-with a spoiler model, moderation and full account deletion. See `docs/ARCHITECTURE.md` (security, crypto,
-privacy data inventory) and `docs/DESIGN.md` (design system).
+browser-generated reader key, no identity data), end-to-end encrypted reading-state sync, a community forum
+(discussions with titles, categories and tags, with or without a chapter) with a spoiler model, moderation and
+full account deletion. See `docs/ARCHITECTURE.md` (security, crypto, privacy data inventory) and `docs/DESIGN.md`
+(design system).
+
+## The community forum
+
+`/community` is a primary destination, not a chapter accessory. A discussion is a titled thread with a category
+and tags; it does **not** have to belong to a chapter. Each published chapter also has one designated discussion,
+which keeps the address it always had (`/chapter/:slug/discussion`) and is reachable from the community like any
+other thread.
+
+- Categories and tags are **data**, not code: `categories` is a table (seeded in `server/migrate.ts`) and tags
+  are free-form. Adding a category is an `INSERT`, not a deploy.
+- A discussion is a `comments` row with `parent_id IS NULL` carrying `title`/`category`/`tags`; a reply is a row
+  with `parent_id` set. Existing chapter discussions were converted in place — no rows were copied, so replies,
+  authorship and timestamps were preserved by construction (`server/migrate.ts`, covered by the `forum migration`
+  tests in `server/api.test.ts`).
+- Nothing individual is indexed: filtered views and single discussions carry no canonical URL. The community
+  index and each chapter's discussion room remain indexable, as before.
 
 ## Content
 
@@ -28,10 +54,12 @@ regenerated from the published content source on every build (`npm run sitemap`)
 Canonical URLs (`src/lib/seo.ts`) use the production origin `https://dusk-shingle.vercel.app` and are kept
 consistent with the sitemap. Account, moderation, API and not-found pages are excluded from both files and
 marked `noindex`; robots directives are crawl hints only — access control stays in the application and API.
+Community pages that are filtered, searched, or a single discussion are `noindex` for the same reason.
 
 Deployment routing (`vercel.json`): every SPA route falls back to `/` so deep links resolve, `robots.txt`
 and `sitemap.xml` are excluded from the fallback and served as real files, and the duplicate variants
-`/library` and `/index.html` permanently redirect to `/`. Do not re-enable `cleanUrls` — it turns
+`/library` and `/index.html` permanently redirect to `/`. The retired discussions index permanently redirects
+`/discussions` → `/community`. Do not re-enable `cleanUrls` — it turns
 `/index.html` into a redirect source and a fallback destination of `/index.html` then 404s every deep link.
 
 ## Deploy (Vercel)
@@ -82,8 +110,12 @@ npm run verify:production   # drives the live site: accounts, discussions, routi
 
 `verify:production` runs the release checklist against a deployed URL (default
 `https://dusk-shingle.vercel.app`, or pass one as the first argument). It creates one throwaway
-account and two comments, then deletes the comments again.
+account, opens a chapter-less discussion, replies to it, and deletes everything again.
 
 ## Routes
 
-`/` library · `/chapter/:slug` reader · `/chapter/:slug/discussion` · `/discussions` · `/account` · `/moderation`
+`/` library · `/chapter/:slug` reader · `/community` forum index · `/community/new` start a discussion ·
+`/community/:id` a discussion · `/community/c/:category` · `/community/t/:tag` · `/community?q=…` search ·
+`/chapter/:slug/discussion` that chapter's discussion · `/account` · `/moderation`
+
+`/discussions` permanently redirects to `/community`.

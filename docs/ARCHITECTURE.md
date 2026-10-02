@@ -1,3 +1,12 @@
+---
+title: "Architecture, Security & Privacy"
+type: wiki
+status: active
+project: "dusk-shingle"
+tags: [architecture, security, privacy, e2ee, anonymous-auth, sync, vercel, postgres]
+created: "2026-09-19"
+---
+
 # Architecture, security & privacy (internal)
 
 This document describes what is **actually implemented**. It is the technical input for the
@@ -5,11 +14,11 @@ future Terms of Service and Privacy Policy, which are intentionally **not** writ
 
 ## Shape
 
-- `src/` — Vite + React SPA (reader, library, discussions, account). History-API routing, no router dependency.
+- `src/` — Vite + React SPA (reader, library, community forum, account). History-API routing, no router dependency.
 - `api/router.ts` — one Vercel Function. `vercel.json` rewrites `/api/:route*` → `/api/router?route=…`.
 - `server/` — framework-neutral handlers (`router.ts`), Postgres access (`db.ts`, `pg` in production,
   PGlite for local dev and tests), security primitives (`security.ts`), schema (`schema.ts`, idempotent,
-  applied on first request per instance).
+  applied on first request per instance), and the community conversion (`migrate.ts`).
 - `src/content/catalog.ts` — chapter metadata shared by UI and API. Prose stays in `src/content/chapters/`.
   Adding a chapter = one catalog entry + one source registration in `chapters.ts`.
 
@@ -59,7 +68,7 @@ server      stores auth_hash = SHA-256("dusk-shingle/auth/v1\0" || authKey)
 | Reading positions, completion, last chapter | reader's devices | AES-GCM ciphertext + version | **Yes** |
 | Private chapter notes | reader's devices | inside the same ciphertext | **Yes** |
 | Appearance preferences (when signed in) | reader's devices | inside the same ciphertext | **Yes** |
-| Public comments, replies | everyone | plaintext (DB encrypted at rest by provider) | **No** — must be distributed & moderated |
+| Public discussions, replies | everyone | plaintext (DB encrypted at rest by provider) | **No** — must be distributed & moderated |
 | Reactions, reports, pseudonym | server | plaintext | No |
 
 Honest caveats: (1) as with any web app, the server delivers the JavaScript that performs encryption, so a
@@ -76,35 +85,87 @@ is deterministic, commutative, associative, idempotent: completion is sticky (OR
 Device clocks only compare the same reader's devices. Offline changes stay local (`dirty` flag) and sync on
 `online`/focus. Corrupted ciphertext fails authentication and **nothing is applied**; decrypted JSON is sanitised.
 
+## The community forum
+
+A **discussion** is a `comments` row with `parent_id IS NULL` that also carries `title`, `category`, `tags` and
+an optional `chapter_slug`. A **reply** is a row with `parent_id` set and none of those columns. One table, two
+shapes — chosen so the existing rows needed no copy, and so replies, authorship, timestamps, reactions and
+reports were preserved by construction rather than by migration script.
+
+| Concept | Stored as | Notes |
+|---|---|---|
+| `scope` | *derived* from `chapter_slug` | `chapter` when set, `community` when null. Never stored, so it cannot disagree. |
+| `category` | `comments.category` → `categories.slug` | Registry, seeded in `migrate.ts`, **not** an enum: adding one is an `INSERT`. |
+| `chapter` | `chapter_slug` (nullable) | Null for a discussion that belongs to no chapter. The old `NOT NULL` is dropped by the migration. |
+| `chapter_number` | derived from the catalog | Sent to the client as `chapterNumber` so it never depends on a slug. |
+| `tags` | `text[]`, GIN-indexed | Free-form, normalised to ≤6 lower-case URL-safe slugs (`server/security.ts`). |
+| designation | `is_chapter_room` + unique partial index | At most one designated discussion per chapter, enforced by the database. |
+| moderation | `comments.state` | Unchanged: `visible` / `hidden` / `removed`, shared by discussions and replies. |
+
+Only a **designated** discussion has a `chapter_slug`. Any other discussion that is about a chapter carries the
+`chapter-NN` **tag** instead — which is what keeps `scope` meaningful and lets one chapter have both its own
+room and any number of tagged threads alongside it.
+
+`categories` and `tags` being data is deliberate: the brief was not to hardcode the set in a way that prevents
+expansion, and a `CHECK` constraint or a `switch` in the client would have done exactly that.
+
+### Converting what already existed
+
+`server/migrate.ts` runs on every cold start, is idempotent, and is safe to run twice concurrently. For each
+chapter that has root comments and no designated discussion it: claims the **oldest** root as the discussion
+(titled after the chapter, tagged `chapter-NN`), then re-homes every *other* former top-level comment — and
+everything anyone had replied beneath it — onto that discussion with a recursive `UPDATE`. Nothing is copied,
+rewritten or deleted: the same rows keep their ids, bodies, authors, timestamps and reactions, and the
+conversation a reader already saw stays together and in order. Verified by the `forum migration` suite, which
+rewinds the database to the pre-forum schema and asserts the row set is byte-identical afterwards.
+
+### What is not indexed
+
+The community index and each chapter's discussion room are canonical and in the sitemap. Filtered views
+(`?category=`, `?tag=`, `?q=`), individual discussions and the composer are `noindex` with no canonical URL:
+the same discussions appear under many filtered addresses, and a single discussion is reader-written,
+unbounded in number, and — in the title alone — capable of spoiling. Deep links, search and sharing all work;
+they are simply not handed to a crawler.
+
 ## Spoiler model
 
-Every comment belongs to a chapter room and declares `reveals_through` (≥ that chapter, ≤ latest published —
-enforced server-side). Because reading progress is E2EE, the **server cannot know what a reader has read**, so
-concealment decisions happen client-side: (1) a room for an unfinished chapter asks before opening;
-(2) comments reaching beyond the reader's finished chapters are folded; (3) inline `||text||` renders as a
-redaction bar until activated. Reports can flag unmarked spoilers.
+Every post declares `reveals_through` — the furthest chapter it reaches. For a discussion about a chapter that
+is that chapter; for a community discussion the author chooses, within `1 … latest published` (enforced
+server-side, so nothing can claim knowledge of an unpublished chapter). Because reading progress is E2EE, the
+**server cannot know what a reader has read**, so concealment is decided client-side in four places: (1) a
+chapter discussion for an unfinished chapter asks before opening; (2) a post reaching past the reader's
+finished chapters, or past the discussion's own declared scope, is folded; (3) an index row whose title would
+reveal past the reader's progress is replaced by a statement of how far it reaches; (4) inline `||text||`
+renders as a redaction bar until activated. (3) exists because the index deliberately carries **no body text** —
+an index of bodies would push unmarked spoilers straight past the gate. Reports can flag unmarked spoilers.
 
 ## Moderation & abuse
 
 Postgres fixed-window rate limits (per account for authenticated actions; per daily-rotating HMAC of the IP for
 account creation/sign-in — the IP itself is never stored; buckets purged after 2 days). New accounts (<10 min)
-may post 2 comments/10 min; others 6/10 min, 40/day. Duplicate text within an hour, >2 URLs, >4000 chars and
-control/bidi-override characters are rejected/stripped. Content is rendered as React text only — no HTML, no
-markdown links, no autolinks. Three independent unresolved reports auto-hide a comment pending review.
-Moderators are accounts with `role='moderator'` set **directly in the database** (no UI or API grants roles);
-every moderation endpoint checks the role server-side.
+may post 2 comments/10 min; others 6/10 min, 40/day. **Starting a discussion** costs a separate, tighter budget
+(1/hour for a new account, 4/hour otherwise) which is charged only on that path and charged *first*, so being
+told to slow down about discussions does not also cost the reader a reply. Duplicate body text within an hour,
+>2 URLs, >4000 chars and control/bidi-override characters are rejected/stripped; titles are 4–140 characters.
+Content is rendered as React text only — no HTML, no markdown links, no autolinks. Three independent
+unresolved reports auto-hide a post pending review. A removed discussion is `404` to everyone except its author
+and moderators. Moderators are accounts with `role='moderator'` set **directly in the database** (no UI or API
+grants roles); every moderation endpoint checks the role server-side.
 
 ## Deletion
 
-`DELETE /api/account` (requires the phrase): comments without replies are deleted; comments with replies become
-tombstones (body emptied, author detached); orphaned tombstones are removed; then the account row is deleted,
-cascading sessions, vault, reactions and reports filed. The client clears all local state. Nothing else is retained.
-Infrastructure (Vercel, database provider) may retain request logs/backups under their own policies.
+`DELETE /api/account` (requires the phrase): discussions and replies without replies are deleted; ones with
+replies become tombstones (body emptied, author detached); orphaned tombstones are removed; then the account row
+is deleted, cascading sessions, vault, reactions and reports filed. The client clears all local state. Nothing
+else is retained. Infrastructure (Vercel, database provider) may retain request logs/backups under their own
+policies.
 
 ## Data inventory
 
 **Application data:** `accounts(id, auth_hash, handle, role, created_at, replies_seen_at)`, `sessions(id_hash,
-account_id, expires_at)`, `vaults(account_id, version, wrapped_key, ciphertext, updated_at)`, `comments(…)`,
+account_id, expires_at)`, `vaults(account_id, version, wrapped_key, ciphertext, updated_at)`,
+`categories(slug, name, description, position)`, `comments(id, chapter_slug?, parent_id?, account_id?, title?,
+category?, tags?, is_chapter_room, body, reveals_through, has_spoiler, state, created_at, edited_at, deleted_at)`,
 `reactions(comment_id, account_id)`, `reports(…, reason, note)`, `rate_events(bucket, window_start, count)`.
 `created_at` exists for new-account rate limits; `replies_seen_at` for reply notifications.
 

@@ -3,11 +3,12 @@
 # Crawler directives only. This file is not a security mechanism: private data
 # is protected by the application and API regardless of what is written here.
 
-# The public reader: library, chapters, chapter discussions, discussions index.
+# The public reader: library, chapters, chapter discussions, and the community.
+# /discussions is a permanent redirect to /community, so it needs no line here.
 User-agent: *
 Allow: /
 Allow: /chapter/
-Allow: /discussions
+Allow: /community
 
 # Private reader surfaces: account management, moderation, and the API.
 # These pages additionally send `X-Robots-Tag: noindex` and a noindex meta.

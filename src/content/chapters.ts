@@ -7,9 +7,15 @@ const sources: Record<string, string> = {
   'the-dry-pump': chapterOneMarkdown,
 };
 
-/** Parse only the prose section after the source document's metadata divider. */
+/**
+ * Parse only the prose section after the source document's metadata divider.
+ * A leading `---…---` block is YAML frontmatter (title, dates, tags) and is
+ * dropped before anything else; without that, the frontmatter's own lines are
+ * indistinguishable from the first paragraphs of the chapter and reach readers.
+ */
 function parsePublishedProse(markdown: string): ChapterBlock[] {
-  const prose = markdown.split(/^---\s*$/m).slice(1).join('\n---\n');
+  const body = markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
+  const prose = body.split(/^---\s*$/m).slice(1).join('\n---\n');
   return prose
     .trim()
     .split(/\n\s*\n/)

@@ -11,12 +11,16 @@ import {
   newHandle,
   newId,
   newSessionSecret,
+  normaliseTags,
   type Limit,
 } from './security.js';
-import { latestPublishedNumber, publishedCatalog, publishedChapterNumber } from '../src/content/catalog.js';
+import { chapterTag, latestPublishedNumber, publishedCatalog, publishedChapterNumber } from '../src/content/catalog.js';
 
 const SESSION_DAYS = 180;
 const MAX_COMMENT = 4000;
+const MAX_TITLE = 140;
+const MIN_TITLE = 4;
+const MAX_PAGE = 50;
 
 const LIMITS = {
   createAccount: { max: 5, windowSeconds: 3600 },
@@ -24,11 +28,18 @@ const LIMITS = {
   comment: { max: 6, windowSeconds: 600 },
   commentNewAccount: { max: 2, windowSeconds: 600 },
   commentDaily: { max: 40, windowSeconds: 86400 },
+  // Starting a discussion is rarer and more costly than replying, so it gets
+  // its own, tighter budget.
+  thread: { max: 4, windowSeconds: 3600 },
+  threadNewAccount: { max: 1, windowSeconds: 3600 },
   edit: { max: 30, windowSeconds: 600 },
   reaction: { max: 60, windowSeconds: 600 },
   report: { max: 10, windowSeconds: 3600 },
   vault: { max: 120, windowSeconds: 600 },
 } satisfies Record<string, Limit>;
+
+const REASONS = ['spoiler', 'harassment', 'spam', 'other'];
+const AUTO_HIDE_REPORTS = 3;
 
 type Account = { id: string; handle: string; role: 'reader' | 'moderator'; created_at: Date };
 
@@ -106,6 +117,8 @@ function body(req: ApiRequest): Record<string, unknown> {
   throw new ApiError(400, 'bad_request', 'The request could not be read.');
 }
 
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
 /**
  * Describe a connection failure well enough to act on, with nothing usable out
  * of it. Connection strings, passwords and user names are redacted; the driver
@@ -131,21 +144,49 @@ function chapterNumberOrThrow(slug: string): number {
   return n;
 }
 
-function validateCommentBody(raw: unknown): { text: string; hasSpoiler: boolean } {
-  if (typeof raw !== 'string') throw new ApiError(400, 'bad_request', 'A comment needs some text.');
+function validateText(raw: unknown, what: string): { text: string; hasSpoiler: boolean } {
+  if (typeof raw !== 'string') throw new ApiError(400, 'bad_request', `A ${what} needs some text.`);
   const text = cleanText(raw);
-  if (!text) throw new ApiError(400, 'empty', 'A comment needs some text.');
-  if (text.length > MAX_COMMENT) throw new ApiError(400, 'too_long', `Comments are limited to ${MAX_COMMENT} characters.`);
-  if (countUrls(text) > 2) throw new ApiError(400, 'too_many_links', 'Comments may include at most two links.');
+  if (!text) throw new ApiError(400, 'empty', `A ${what} needs some text.`);
+  if (text.length > MAX_COMMENT) throw new ApiError(400, 'too_long', `${what[0].toUpperCase()}${what.slice(1)}s are limited to ${MAX_COMMENT} characters.`);
+  if (countUrls(text) > 2) throw new ApiError(400, 'too_many_links', 'Posts may include at most two links.');
   return { text, hasSpoiler: /\|\|[^|]+\|\|/.test(text) };
 }
 
-function validateReveals(raw: unknown, chapterNumber: number): number {
-  const value = raw === undefined ? chapterNumber : raw;
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < chapterNumber || value > latestPublishedNumber()) {
-    throw new ApiError(400, 'bad_spoiler_scope', 'Choose which chapters this comment discusses.');
+function validateTitle(raw: unknown): string {
+  if (typeof raw !== 'string') throw new ApiError(400, 'bad_request', 'A discussion needs a title.');
+  const title = cleanText(raw).replace(/\s+/g, ' ');
+  if (title.length < MIN_TITLE) throw new ApiError(400, 'short_title', `Give the discussion a title of at least ${MIN_TITLE} characters.`);
+  if (title.length > MAX_TITLE) throw new ApiError(400, 'too_long', `Titles are limited to ${MAX_TITLE} characters.`);
+  return title;
+}
+
+function validateTags(raw: unknown): string[] {
+  try {
+    return normaliseTags(raw);
+  } catch {
+    throw new ApiError(400, 'bad_request', 'Tags could not be read.');
+  }
+}
+
+/**
+ * How far into the published edition a post reaches. The floor is the thread's
+ * own chapter (or the first chapter for a community-wide discussion); the
+ * ceiling is the latest published chapter, so nothing can claim knowledge of
+ * an unpublished chapter.
+ */
+function validateReveals(raw: unknown, floor: number): number {
+  const value = raw === undefined || raw === null ? floor : raw;
+  const latest = latestPublishedNumber();
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < floor || value > latest) {
+    throw new ApiError(400, 'bad_spoiler_scope', 'Choose which chapters this discusses.');
   }
   return value;
+}
+
+/** The lowest chapter a post in this thread may claim to reach. */
+function floorFor(chapterNumber: number | null): number {
+  return chapterNumber ?? 1;
 }
 
 type CommentRow = {
@@ -185,15 +226,98 @@ function presentComment(row: CommentRow, viewer?: Account) {
   };
 }
 
+/** The columns every thread query needs. `replies`/`activity` keep the feed to one round trip. */
+const THREAD_COLUMNS = `
+  c.id, c.parent_id, c.account_id, c.chapter_slug, c.title, c.category, c.tags, c.is_chapter_room,
+  a.handle, k.name AS category_name, c.body, c.reveals_through, c.has_spoiler, c.state,
+  c.created_at, c.edited_at, c.deleted_at,
+  (SELECT count(*) FROM comments r WHERE r.parent_id = c.id AND r.state <> 'removed') AS replies,
+  (SELECT count(*) FROM reactions x WHERE x.comment_id = c.id) AS reactions,
+  EXISTS (SELECT 1 FROM reactions x WHERE x.comment_id = c.id AND x.account_id = $1) AS reacted,
+  greatest(c.created_at, coalesce((SELECT max(created_at) FROM comments r WHERE r.parent_id = c.id), c.created_at)) AS activity`;
+
+type ThreadRow = {
+  id: string;
+  parent_id: string | null;
+  account_id: string | null;
+  chapter_slug: string | null;
+  title: string | null;
+  category: string | null;
+  tags: string[] | null;
+  is_chapter_room: boolean;
+  handle: string | null;
+  category_name: string | null;
+  body: string;
+  reveals_through: number;
+  has_spoiler: boolean;
+  state: string;
+  created_at: Date;
+  edited_at: Date | null;
+  deleted_at: Date | null;
+  replies: string | number;
+  reactions: string | number;
+  reacted: boolean;
+  activity: Date;
+};
+
+/**
+ * A discussion as the reader sees it. `scope` is derived from the chapter
+ * association rather than stored, so the two can never disagree. The body is
+ * included here but deliberately not in the index payload: a list of bodies
+ * would push unmarked spoilers past the chapter gate, and the gate is the only
+ * thing standing between a reader and the end of a chapter they have not read.
+ */
+function presentThread(row: ThreadRow, viewer?: Account) {
+  const base = presentComment(row as CommentRow, viewer);
+  return {
+    ...base,
+    scope: row.chapter_slug ? 'chapter' : 'community',
+    title: row.title ?? 'Discussion',
+    category: row.category ?? 'general',
+    categoryName: row.category_name ?? 'General',
+    chapterSlug: row.chapter_slug,
+    chapterNumber: row.chapter_slug ? (publishedChapterNumber(row.chapter_slug) ?? null) : null,
+    tags: row.tags ?? [],
+    isChapterRoom: row.is_chapter_room,
+    replies: Number(row.replies ?? 0),
+    lastActivityAt: row.activity,
+  };
+}
+
+async function requireCategory(db: Db, slug: unknown): Promise<string> {
+  if (typeof slug !== 'string' || !slug) throw new ApiError(400, 'bad_category', 'Choose a category for the discussion.');
+  const { rows } = await db.query(`SELECT 1 FROM categories WHERE slug = $1`, [slug]);
+  if (!rows[0]) throw new ApiError(400, 'bad_category', 'That category is not one we have. Choose another.');
+  return slug;
+}
+
+async function loadThread(db: Db, id: string, viewer?: Account) {
+  if (!isUuid(id)) throw new ApiError(404, 'no_discussion', 'That discussion no longer exists.');
+  const { rows } = await db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+       LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.id = $2 AND c.parent_id IS NULL`,
+    [viewer?.id ?? null, id],
+  );
+  const row = rows[0];
+  if (!row) throw new ApiError(404, 'no_discussion', 'That discussion no longer exists.');
+  // Moderation state is the author's and the moderators' to see; to everyone
+  // else a removed discussion is simply gone.
+  if (row.state === 'removed' && row.account_id !== viewer?.id && viewer?.role !== 'moderator') {
+    throw new ApiError(404, 'no_discussion', 'That discussion no longer exists.');
+  }
+  return row;
+}
+
 async function loadOwnedComment(db: Db, id: string, account: Account) {
   if (!isUuid(id)) throw new ApiError(404, 'no_comment', 'That comment no longer exists.');
-  const { rows } = await db.query<{ id: string; account_id: string | null; chapter_slug: string; deleted_at: Date | null; state: string }>(
-    `SELECT id, account_id, chapter_slug, deleted_at, state FROM comments WHERE id = $1`,
+  const { rows } = await db.query<{ id: string; parent_id: string | null; account_id: string | null; chapter_slug: string | null; is_chapter_room: boolean; deleted_at: Date | null; state: string }>(
+    `SELECT id, parent_id, account_id, chapter_slug, is_chapter_room, deleted_at, state FROM comments WHERE id = $1`,
     [id],
   );
   const row = rows[0];
   if (!row || row.deleted_at) throw new ApiError(404, 'no_comment', 'That comment no longer exists.');
-  if (row.account_id !== account.id) throw new ApiError(403, 'not_yours', 'You can only change your own comments.');
+  if (row.account_id !== account.id) throw new ApiError(403, 'not_yours', 'You can only change your own posts.');
   return row;
 }
 
@@ -341,59 +465,314 @@ const putVault: Handler = async (ctx) => {
   return json(200, { version: result.rows[0].version });
 };
 
-const listComments: Handler = async (ctx) => {
-  const slug = ctx.params[0];
-  chapterNumberOrThrow(slug);
+// ───────────────────────── community forum ─────────────────────────
+
+/** Index payload for a thread: the summary without the body. */
+function presentSummary(row: ThreadRow, viewer?: Account) {
+  const { body: _body, ...summary } = presentThread(row, viewer);
+  void _body;
+  return summary;
+}
+
+/** A discussion is listed unless it was removed, unless you wrote it. */
+const VISIBLE = '(c.state = \'visible\' OR c.account_id = $1 OR $2::boolean)';
+
+// ───────────────────────── community forum handlers ─────────────────────────
+
+const forumIndex: Handler = async (ctx) => {
   const viewer = await optionalAccount(ctx);
+  const me = viewer?.id ?? null;
+  const isMod = viewer?.role === 'moderator';
+
+  const categories = await ctx.db.query<{ slug: string; name: string; description: string; discussions: string | number }>(
+    `SELECT k.slug, k.name, k.description, count(c.id) AS discussions
+     FROM categories k
+     LEFT JOIN comments c ON c.category = k.slug AND c.parent_id IS NULL
+       AND c.state = 'visible' AND c.deleted_at IS NULL
+     GROUP BY k.slug, k.name, k.description, k.position
+     ORDER BY k.position, k.name`,
+  );
+  const rooms = await ctx.db.query<{ chapter_slug: string; n: string | number; latest: Date }>(
+    `SELECT chapter_slug, count(*) AS n, max(created_at) AS latest FROM comments
+     WHERE parent_id IS NULL AND chapter_slug IS NOT NULL AND state = 'visible' AND deleted_at IS NULL
+     GROUP BY chapter_slug`,
+  );
+  const roomRows = await ctx.db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.is_chapter_room AND c.parent_id IS NULL ORDER BY c.created_at`,
+    [me],
+  );
+  const tags = await ctx.db.query<{ tag: string; discussions: string | number }>(
+    `SELECT t.tag, count(*) AS discussions
+     FROM comments c, unnest(c.tags) AS t(tag)
+     WHERE c.parent_id IS NULL AND c.state = 'visible' AND c.deleted_at IS NULL
+     GROUP BY t.tag ORDER BY count(*) DESC, t.tag LIMIT 30`,
+  );
+  const total = await ctx.db.query<{ n: string | number }>(
+    `SELECT count(*) AS n FROM comments c WHERE c.parent_id IS NULL AND c.state = 'visible' AND c.deleted_at IS NULL`,
+  );
+
+  const latest = await ctx.db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.parent_id IS NULL AND ${VISIBLE} AND c.deleted_at IS NULL
+     ORDER BY c.created_at DESC, c.id DESC LIMIT 12`,
+    [me, isMod],
+  );
+  const active = await ctx.db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.parent_id IS NULL AND ${VISIBLE} AND c.deleted_at IS NULL
+       AND EXISTS (SELECT 1 FROM comments r WHERE r.parent_id = c.id AND r.state <> 'removed')
+     ORDER BY replies DESC, activity DESC LIMIT 6`,
+    [me, isMod],
+  );
+
+  const bySlug = new Map(rooms.rows.map((r) => [r.chapter_slug, r]));
+  const roomBySlug = new Map(roomRows.rows.map((r) => [r.chapter_slug, r]));
+
+  return json(200, {
+    categories: categories.rows.map((c) => ({ ...c, discussions: Number(c.discussions) })),
+    latest: latest.rows.map((r) => presentSummary(r, viewer)),
+    active: active.rows.map((r) => presentSummary(r, viewer)),
+    chapterRooms: publishedCatalog().map((c) => {
+      const stats = bySlug.get(c.slug);
+      const room = roomBySlug.get(c.slug);
+      return {
+        slug: c.slug,
+        number: c.number,
+        id: room?.id ?? null,
+        title: room?.title ?? null,
+        discussions: Number(stats?.n ?? 0),
+        replies: Number(room?.replies ?? 0),
+        latest: stats?.latest ?? null,
+      };
+    }),
+    tags: tags.rows.map((t) => ({ tag: t.tag, discussions: Number(t.discussions) })),
+    total: Number(total.rows[0]?.n ?? 0),
+  });
+};
+
+const listThreads: Handler = async (ctx) => {
+  const viewer = await optionalAccount(ctx);
+  const params: unknown[] = [viewer?.id ?? null, viewer?.role === 'moderator'];
+  const clause = (sql: string, value: unknown) => {
+    params.push(value);
+    return sql.replace('?', `$${params.length}`);
+  };
+  let where = 'c.parent_id IS NULL';
+  const q = ctx.req.query ?? {};
+  if (typeof q.category === 'string' && q.category) where += ` AND c.category = ${clause('?', q.category)}`;
+  if (typeof q.tag === 'string' && q.tag) where += ` AND ${clause('?', q.tag)} = ANY(c.tags)`;
+  if (q.scope === 'community') where += ' AND c.chapter_slug IS NULL';
+  if (q.scope === 'chapter') where += ' AND c.chapter_slug IS NOT NULL';
+  if (typeof q.chapter === 'string' && q.chapter) where += ` AND c.chapter_slug = ${clause('?', q.chapter)}`;
+  if (typeof q.q === 'string' && q.q.trim()) {
+    const needle = `%${q.q.trim().slice(0, 80)}%`;
+    where += ` AND (c.title ILIKE ${clause('?', needle)} OR c.body ILIKE ${clause('?', needle)})`;
+  }
+  const limit = clamp(Number(q.limit) || 20, 1, MAX_PAGE);
+  const offset = clamp(Number(q.offset) || 0, 0, 1000);
+  const order = q.sort === 'active' ? 'replies DESC, activity DESC' : 'c.created_at DESC, c.id DESC';
+  if (q.sort === 'active') where += ` AND EXISTS (SELECT 1 FROM comments r WHERE r.parent_id = c.id AND r.state <> 'removed')`;
+
+  const { rows } = await ctx.db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE ${where} AND ${VISIBLE} AND c.deleted_at IS NULL
+     ORDER BY ${order} LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}`,
+    params,
+  );
+  return json(200, { threads: rows.map((r) => presentSummary(r, viewer)), offset, limit, hasMore: rows.length === limit });
+};
+
+const chapterRoom: Handler = async (ctx) => {
+  const slug = ctx.params[0];
+  const number = chapterNumberOrThrow(slug);
+  const viewer = await optionalAccount(ctx);
+  const { rows } = await ctx.db.query<ThreadRow>(
+    `SELECT ${THREAD_COLUMNS} FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.is_chapter_room AND c.chapter_slug = $2 AND c.parent_id IS NULL`,
+    [viewer?.id ?? null, slug],
+  );
+  const room = rows[0];
+  if (!room) return json(200, { chapter: { slug, number }, room: null, replies: [] });
+  const replies = await ctx.db.query<CommentRow>(
+    `SELECT c.id, c.parent_id, c.account_id, a.handle, c.body, c.reveals_through, c.has_spoiler, c.state,
+            c.created_at, c.edited_at, c.deleted_at,
+            (SELECT count(*) FROM reactions x WHERE x.comment_id = c.id) AS reactions,
+            EXISTS (SELECT 1 FROM reactions x WHERE x.comment_id = c.id AND x.account_id = $2) AS reacted
+     FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.parent_id = $1 AND c.state <> 'removed' OR (c.parent_id = $1 AND c.account_id = $2)
+     ORDER BY c.created_at ASC LIMIT 1000`,
+    [room.id, viewer?.id ?? null],
+  );
+  return json(200, {
+    chapter: { slug, number },
+    room: presentThread(room, viewer),
+    replies: replies.rows.map((r) => presentComment(r, viewer)),
+  });
+};
+
+const getThread: Handler = async (ctx) => {
+  const viewer = await optionalAccount(ctx);
+  const row = await loadThread(ctx.db, ctx.params[0], viewer);
   const { rows } = await ctx.db.query<CommentRow>(
     `SELECT c.id, c.parent_id, c.account_id, a.handle, c.body, c.reveals_through, c.has_spoiler, c.state,
             c.created_at, c.edited_at, c.deleted_at,
-            (SELECT count(*) FROM reactions r WHERE r.comment_id = c.id) AS reactions,
-            EXISTS (SELECT 1 FROM reactions r WHERE r.comment_id = c.id AND r.account_id = $2) AS reacted
+            (SELECT count(*) FROM reactions x WHERE x.comment_id = c.id) AS reactions,
+            EXISTS (SELECT 1 FROM reactions x WHERE x.comment_id = c.id AND x.account_id = $2) AS reacted
      FROM comments c LEFT JOIN accounts a ON a.id = c.account_id
-     WHERE c.chapter_slug = $1 AND c.state <> 'removed' OR (c.chapter_slug = $1 AND c.account_id = $2)
+     LEFT JOIN categories k ON k.slug = c.category
+     WHERE c.parent_id = $1 AND c.state <> 'removed' OR (c.parent_id = $1 AND c.account_id = $2)
      ORDER BY c.created_at ASC LIMIT 1000`,
-    [slug, viewer?.id ?? null],
+    [row.id, viewer?.id ?? null],
   );
-  return json(200, { comments: rows.map((r) => presentComment(r, viewer)), viewer: viewer ? { handle: viewer.handle, role: viewer.role } : null });
+  return json(200, {
+    thread: presentThread(row, viewer),
+    replies: rows.map((r) => presentComment(r, viewer)),
+    viewer: viewer ? { handle: viewer.handle, role: viewer.role } : null,
+  });
 };
 
-const createComment: Handler = async (ctx) => {
+/** Every post, discussion or reply, spends the shared speaking budget. */
+async function spendPostLimits(db: Db, account: Account) {
+  const isNew = Date.now() - new Date(account.created_at).getTime() < 10 * 60 * 1000;
+  await limit(db, `comment:${account.id}`, isNew ? LIMITS.commentNewAccount : LIMITS.comment);
+  await limit(db, `comment-day:${account.id}`, LIMITS.commentDaily);
+}
+
+/**
+ * Starting a discussion spends an extra budget on top of speaking. It is
+ * charged only here, never on a reply, so the two budgets cannot starve each
+ * other, and it is charged first so that being told to slow down does not also
+ * cost the reader a reply.
+ */
+async function spendThreadLimits(db: Db, account: Account) {
+  const isNew = Date.now() - new Date(account.created_at).getTime() < 10 * 60 * 1000;
+  await limit(db, `thread:${account.id}`, isNew ? LIMITS.threadNewAccount : LIMITS.thread);
+  await limit(db, `comment:${account.id}`, isNew ? LIMITS.commentNewAccount : LIMITS.comment);
+  await limit(db, `comment-day:${account.id}`, LIMITS.commentDaily);
+}
+
+/** The same body within the hour is a double submit, not a new post. */
+async function rejectDuplicate(db: Db, account: Account, text: string) {
+  const dupe = await db.query(
+    `SELECT 1 FROM comments WHERE account_id = $1 AND body = $2 AND created_at > now() - interval '1 hour'`,
+    [account.id, text],
+  );
+  if (dupe.rows.length) throw new ApiError(409, 'duplicate', 'You have already posted this.');
+}
+
+const createThread: Handler = async (ctx) => {
+  const account = await requireAccount(ctx);
+  const input = body(ctx.req);
+  const { text, hasSpoiler } = validateText(input.body, 'discussion');
+  const title = validateTitle(input.title);
+  const category = await requireCategory(ctx.db, input.category);
+  const tags = validateTags(input.tags);
+  const reveals = validateReveals(input.revealsThrough, 1);
+  await rejectDuplicate(ctx.db, account, text);
+  await spendThreadLimits(ctx.db, account);
+  const id = newId();
+  await ctx.db.query(
+    `INSERT INTO comments (id, chapter_slug, parent_id, account_id, title, category, tags, body, reveals_through, has_spoiler)
+     VALUES ($1, NULL, NULL, $2, $3, $4, $5, $6, $7, $8)`,
+    [id, account.id, title, category, tags, text, reveals, hasSpoiler],
+  );
+  return json(201, { id });
+};
+
+const createChapterRoom: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
   const slug = ctx.params[0];
-  const chapterNumber = chapterNumberOrThrow(slug);
+  const number = chapterNumberOrThrow(slug);
   const input = body(ctx.req);
-  const { text, hasSpoiler } = validateCommentBody(input.body);
-  const reveals = validateReveals(input.revealsThrough, chapterNumber);
-
-  let parentId: string | null = null;
-  if (input.parentId !== undefined && input.parentId !== null) {
-    if (!isUuid(input.parentId)) throw new ApiError(400, 'bad_parent', 'That comment cannot be replied to.');
-    const parent = await ctx.db.query<{ id: string; parent_id: string | null; chapter_slug: string; deleted_at: Date | null; state: string }>(
-      `SELECT id, parent_id, chapter_slug, deleted_at, state FROM comments WHERE id = $1`,
-      [input.parentId],
+  const { text, hasSpoiler } = validateText(input.body, 'discussion');
+  const title = typeof input.title === 'string' && input.title.trim() ? validateTitle(input.title) : `Chapter ${String(number).padStart(2, '0')}`;
+  await rejectDuplicate(ctx.db, account, text);
+  await spendThreadLimits(ctx.db, account);
+  const id = newId();
+  try {
+    await ctx.db.query(
+      `INSERT INTO comments (id, chapter_slug, parent_id, account_id, title, category, tags, is_chapter_room, body, reveals_through, has_spoiler)
+       VALUES ($1, $2, NULL, $3, $4, 'chapter', $5, true, $6, $7, $8)`,
+      [id, slug, account.id, title, [chapterTag(number)], text, number, hasSpoiler],
     );
-    const p = parent.rows[0];
-    if (!p || p.chapter_slug !== slug || p.deleted_at || p.state !== 'visible') {
-      throw new ApiError(400, 'bad_parent', 'That comment can no longer be replied to.');
+  } catch (error) {
+    // Two readers can open an empty chapter at the same moment; the unique
+    // index settles it, and the loser is sent to the room that won.
+    if ((error as { code?: string }).code === '23505') {
+      const { rows } = await ctx.db.query<{ id: string }>(
+        `SELECT id FROM comments WHERE is_chapter_room AND chapter_slug = $1`,
+        [slug],
+      );
+      throw new ApiError(409, 'room_exists', 'Someone opened this chapter’s discussion a moment before you. Your words are not lost — open theirs and add them there.', {
+        id: rows[0]?.id ?? null,
+      });
     }
-    parentId = p.parent_id ?? p.id; // threads are one level deep
+    throw error;
   }
+  return json(201, { id });
+};
+
+const updateThread: Handler = async (ctx) => {
+  const account = await requireAccount(ctx);
+  await limit(ctx.db, `edit:${account.id}`, LIMITS.edit);
+  const row = await loadOwnedComment(ctx.db, ctx.params[0], account);
+  if (row.parent_id !== null) throw new ApiError(400, 'not_a_discussion', 'That is a reply, not a discussion.');
+  if (row.state === 'removed') throw new ApiError(403, 'moderated', 'This discussion was removed by moderation and cannot be edited.');
+  const input = body(ctx.req);
+  const { text, hasSpoiler } = validateText(input.body, 'discussion');
+  const title = validateTitle(input.title);
+  const category = row.is_chapter_room ? 'chapter' : await requireCategory(ctx.db, input.category);
+  const tags = row.is_chapter_room ? undefined : validateTags(input.tags);
+  const floor = floorFor(row.chapter_slug ? publishedChapterNumber(row.chapter_slug) ?? null : null);
+  const reveals = validateReveals(input.revealsThrough, floor);
+  await ctx.db.query(
+    `UPDATE comments SET title = $2, category = $3, tags = coalesce($4, tags), body = $5, has_spoiler = $6,
+            reveals_through = $7, edited_at = now()
+     WHERE id = $1`,
+    [row.id, title, category, tags ?? null, text, hasSpoiler, reveals],
+  );
+  return json(200, { ok: true });
+};
+
+const deleteThread: Handler = async (ctx) => {
+  const account = await requireAccount(ctx);
+  const row = await loadOwnedComment(ctx.db, ctx.params[0], account);
+  if (row.parent_id !== null) throw new ApiError(400, 'not_a_discussion', 'That is a reply, not a discussion.');
+  await ctx.db.transaction((tx) => removeComment(tx, row.id));
+  return json(200, { ok: true });
+};
+
+const createReply: Handler = async (ctx) => {
+  const account = await requireAccount(ctx);
+  const thread = await loadThread(ctx.db, ctx.params[0], account);
+  if (thread.deleted_at || thread.state !== 'visible') {
+    throw new ApiError(400, 'closed', 'This discussion can no longer be replied to.');
+  }
+  const input = body(ctx.req);
+  const { text, hasSpoiler } = validateText(input.body, 'reply');
+  const floor = floorFor(thread.chapter_slug ? publishedChapterNumber(thread.chapter_slug) ?? null : null);
+  const reveals = validateReveals(input.revealsThrough, floor);
 
   const dupe = await ctx.db.query(
     `SELECT 1 FROM comments WHERE account_id = $1 AND body = $2 AND created_at > now() - interval '1 hour'`,
     [account.id, text],
   );
   if (dupe.rows.length) throw new ApiError(409, 'duplicate', 'You have already posted this.');
+  await spendPostLimits(ctx.db, account);
 
-  const isNew = Date.now() - new Date(account.created_at).getTime() < 10 * 60 * 1000;
-  await limit(ctx.db, `comment:${account.id}`, isNew ? LIMITS.commentNewAccount : LIMITS.comment);
-  await limit(ctx.db, `comment-day:${account.id}`, LIMITS.commentDaily);
   const id = newId();
   await ctx.db.query(
     `INSERT INTO comments (id, chapter_slug, parent_id, account_id, body, reveals_through, has_spoiler)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [id, slug, parentId, account.id, text, reveals, hasSpoiler],
+    // Threads are one level deep: a reply to a reply lands on its discussion.
+    [id, thread.chapter_slug, thread.id, account.id, text, reveals, hasSpoiler],
   );
   return json(201, { id });
 };
@@ -402,10 +781,13 @@ const editComment: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
   await limit(ctx.db, `edit:${account.id}`, LIMITS.edit);
   const row = await loadOwnedComment(ctx.db, ctx.params[0], account);
-  if (row.state === 'removed') throw new ApiError(403, 'moderated', 'This comment was removed by moderation and cannot be edited.');
+  if (row.parent_id === null) throw new ApiError(400, 'is_a_discussion', 'Edit the discussion itself, not this post.');
+  if (row.state === 'removed') throw new ApiError(403, 'moderated', 'This post was removed by moderation and cannot be edited.');
   const input = body(ctx.req);
-  const { text, hasSpoiler } = validateCommentBody(input.body);
-  const reveals = validateReveals(input.revealsThrough, chapterNumberOrThrow(row.chapter_slug));
+  const { text, hasSpoiler } = validateText(input.body, 'reply');
+  const parent = await loadThread(ctx.db, row.parent_id, account);
+  const floor = floorFor(parent.chapter_slug ? publishedChapterNumber(parent.chapter_slug) ?? null : null);
+  const reveals = validateReveals(input.revealsThrough, floor);
   await ctx.db.query(
     `UPDATE comments SET body = $2, has_spoiler = $3, reveals_through = $4, edited_at = now() WHERE id = $1`,
     [row.id, text, hasSpoiler, reveals],
@@ -416,6 +798,7 @@ const editComment: Handler = async (ctx) => {
 const deleteComment: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
   const row = await loadOwnedComment(ctx.db, ctx.params[0], account);
+  if (row.parent_id === null) throw new ApiError(400, 'is_a_discussion', 'Delete the discussion itself, not this post.');
   await ctx.db.transaction((tx) => removeComment(tx, row.id));
   return json(200, { ok: true });
 };
@@ -446,52 +829,51 @@ const removeReaction: Handler = async (ctx) => {
   return json(200, { ok: true });
 };
 
-const REPORT_REASONS = ['spoiler', 'harassment', 'spam', 'other'];
-const AUTO_HIDE_REPORTS = 3;
-
 const reportComment: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
   await limit(ctx.db, `report:${account.id}`, LIMITS.report);
-  const comment = await reactableComment(ctx.db, ctx.params[0]);
-  if (comment.account_id === account.id) throw new ApiError(400, 'own_comment', 'You cannot report your own comment.');
+  const post = await reactableComment(ctx.db, ctx.params[0]);
+  if (post.account_id === account.id) throw new ApiError(400, 'own_comment', 'You cannot report your own post.');
   const { reason, note } = body(ctx.req);
-  if (typeof reason !== 'string' || !REPORT_REASONS.includes(reason)) throw new ApiError(400, 'bad_reason', 'Choose a reason for the report.');
+  if (typeof reason !== 'string' || !REASONS.includes(reason)) throw new ApiError(400, 'bad_reason', 'Choose a reason for the report.');
   const cleanNote = typeof note === 'string' ? cleanText(note).slice(0, 500) || null : null;
   await ctx.db.query(
     `INSERT INTO reports (id, comment_id, reporter_id, reason, note) VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (comment_id, reporter_id) DO NOTHING`,
-    [newId(), comment.id, account.id, reason, cleanNote],
+    [newId(), post.id, account.id, reason, cleanNote],
   );
-  // Community safety valve: enough independent reports hide the comment pending moderator review.
+  // Community safety valve: enough independent reports hide the post pending moderator review.
   await ctx.db.query(
     `UPDATE comments SET state = 'hidden' WHERE id = $1 AND state = 'visible'
      AND (SELECT count(*) FROM reports WHERE comment_id = $1 AND resolved_at IS NULL) >= $2`,
-    [comment.id, AUTO_HIDE_REPORTS],
+    [post.id, AUTO_HIDE_REPORTS],
   );
   return json(200, { ok: true });
 };
 
 const notifications: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
-  const { rows } = await ctx.db.query<{ id: string; chapter_slug: string; parent_id: string; handle: string | null; created_at: Date; unread: boolean }>(
-    `SELECT r.id, r.chapter_slug, r.parent_id, a.handle, r.created_at,
+  const { rows } = await ctx.db.query<{ id: string; discussion_id: string; title: string | null; handle: string | null; created_at: Date; unread: boolean }>(
+    `SELECT r.id, r.parent_id AS discussion_id, t.title, a.handle, r.created_at,
             r.created_at > me.replies_seen_at AS unread
      FROM comments r
-     JOIN comments p ON p.id = r.parent_id
+     JOIN comments t ON t.id = r.parent_id AND t.parent_id IS NULL
      JOIN accounts me ON me.id = $1
      LEFT JOIN accounts a ON a.id = r.account_id
-     WHERE p.account_id = $1 AND (r.account_id IS NULL OR r.account_id <> $1)
+     WHERE t.account_id = $1 AND (r.account_id IS NULL OR r.account_id <> $1)
        AND r.deleted_at IS NULL AND r.state = 'visible'
      ORDER BY r.created_at DESC LIMIT 20`,
     [account.id],
   );
-  const moderated = await ctx.db.query<{ id: string; chapter_slug: string; state: string }>(
-    `SELECT id, chapter_slug, state FROM comments WHERE account_id = $1 AND state <> 'visible' AND deleted_at IS NULL LIMIT 20`,
+  const moderated = await ctx.db.query<{ id: string; discussion_id: string | null; title: string | null; state: string }>(
+    `SELECT m.id, m.parent_id AS discussion_id, t.title, m.state
+     FROM comments m LEFT JOIN comments t ON t.id = m.parent_id
+     WHERE m.account_id = $1 AND m.state <> 'visible' AND m.deleted_at IS NULL LIMIT 20`,
     [account.id],
   );
   return json(200, {
-    replies: rows.map((r) => ({ id: r.id, chapterSlug: r.chapter_slug, parentId: r.parent_id, author: r.handle, createdAt: r.created_at, unread: r.unread })),
-    moderated: moderated.rows.map((m) => ({ id: m.id, chapterSlug: m.chapter_slug, state: m.state })),
+    replies: rows.map((r) => ({ id: r.id, discussionId: r.discussion_id, title: r.title, author: r.handle, createdAt: r.created_at, unread: r.unread })),
+    moderated: moderated.rows.map((m) => ({ id: m.id, discussionId: m.discussion_id, title: m.title, state: m.state })),
   });
 };
 
@@ -499,21 +881,6 @@ const markNotificationsSeen: Handler = async (ctx) => {
   const account = await requireAccount(ctx);
   await ctx.db.query(`UPDATE accounts SET replies_seen_at = now() WHERE id = $1`, [account.id]);
   return json(200, { ok: true });
-};
-
-const discussions: Handler = async ({ db }) => {
-  const { rows } = await db.query<{ chapter_slug: string; n: string | number; latest: Date }>(
-    `SELECT chapter_slug, count(*) AS n, max(created_at) AS latest FROM comments
-     WHERE deleted_at IS NULL AND state = 'visible' GROUP BY chapter_slug`,
-  );
-  const bySlug = new Map(rows.map((r) => [r.chapter_slug, r]));
-  return json(200, {
-    chapters: publishedCatalog().map((c) => ({
-      slug: c.slug,
-      comments: Number(bySlug.get(c.slug)?.n ?? 0),
-      latest: bySlug.get(c.slug)?.latest ?? null,
-    })),
-  });
 };
 
 async function requireModerator(ctx: Ctx): Promise<Account> {
@@ -524,13 +891,33 @@ async function requireModerator(ctx: Ctx): Promise<Account> {
 
 const moderationQueue: Handler = async (ctx) => {
   await requireModerator(ctx);
-  const { rows } = await ctx.db.query<{ id: string; chapter_slug: string; body: string; state: string; handle: string | null; reports: string | number; reasons: string[] }>(
-    `SELECT c.id, c.chapter_slug, c.body, c.state, a.handle, count(r.id) AS reports, array_agg(DISTINCT r.reason) AS reasons
-     FROM reports r JOIN comments c ON c.id = r.comment_id LEFT JOIN accounts a ON a.id = c.account_id
+  const { rows } = await ctx.db.query<{
+    id: string; discussion_id: string | null; discussion_title: string | null; chapter_slug: string | null;
+    body: string; state: string; handle: string | null; reports: string | number; reasons: string[];
+  }>(
+    `SELECT c.id, coalesce(c.parent_id, c.id) AS discussion_id, t.title AS discussion_title, c.chapter_slug,
+            c.body, c.state, a.handle, count(r.id) AS reports, array_agg(DISTINCT r.reason) AS reasons
+     FROM reports r
+     JOIN comments c ON c.id = r.comment_id
+     LEFT JOIN comments t ON t.id = coalesce(c.parent_id, c.id)
+     LEFT JOIN accounts a ON a.id = c.account_id
+     LEFT JOIN categories k ON k.slug = c.category
      WHERE r.resolved_at IS NULL AND c.deleted_at IS NULL
-     GROUP BY c.id, a.handle ORDER BY count(r.id) DESC LIMIT 100`,
+     GROUP BY c.id, t.title, a.handle ORDER BY count(r.id) DESC LIMIT 100`,
   );
-  return json(200, { items: rows.map((r) => ({ id: r.id, chapterSlug: r.chapter_slug, body: r.body, state: r.state, author: r.handle, reports: Number(r.reports), reasons: r.reasons })) });
+  return json(200, {
+    items: rows.map((r) => ({
+      id: r.id,
+      discussionId: r.discussion_id,
+      discussionTitle: r.discussion_title,
+      chapterSlug: r.chapter_slug,
+      body: r.body,
+      state: r.state,
+      author: r.handle,
+      reports: Number(r.reports),
+      reasons: r.reasons,
+    })),
+  });
 };
 
 const moderate: Handler = async (ctx) => {
@@ -557,9 +944,15 @@ const routes: Array<[string, RegExp, Handler]> = [
   ['DELETE', /^\/api\/sessions$/, signOutEverywhere],
   ['GET', /^\/api\/vault$/, getVault],
   ['PUT', /^\/api\/vault$/, putVault],
-  ['GET', /^\/api\/discussions$/, discussions],
-  ['GET', /^\/api\/chapters\/([a-z0-9-]{1,80})\/comments$/, listComments],
-  ['POST', /^\/api\/chapters\/([a-z0-9-]{1,80})\/comments$/, createComment],
+  ['GET', /^\/api\/forum$/, forumIndex],
+  ['GET', /^\/api\/forum\/threads$/, listThreads],
+  ['POST', /^\/api\/forum\/threads$/, createThread],
+  ['GET', /^\/api\/forum\/threads\/chapter\/([a-z0-9-]{1,80})$/, chapterRoom],
+  ['POST', /^\/api\/forum\/threads\/chapter\/([a-z0-9-]{1,80})$/, createChapterRoom],
+  ['GET', /^\/api\/forum\/threads\/([^/]+)$/, getThread],
+  ['PATCH', /^\/api\/forum\/threads\/([^/]+)$/, updateThread],
+  ['DELETE', /^\/api\/forum\/threads\/([^/]+)$/, deleteThread],
+  ['POST', /^\/api\/forum\/threads\/([^/]+)\/comments$/, createReply],
   ['PATCH', /^\/api\/comments\/([^/]+)$/, editComment],
   ['DELETE', /^\/api\/comments\/([^/]+)$/, deleteComment],
   ['PUT', /^\/api\/comments\/([^/]+)\/reaction$/, addReaction],

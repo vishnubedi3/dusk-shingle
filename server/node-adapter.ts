@@ -28,6 +28,7 @@ export async function serveNode(req: IncomingMessage & { body?: unknown }, res: 
   // Vercel rewrites /api/<x> → /api/router?route=<x>; the dev server passes the real path.
   const route = url.searchParams.get('route');
   const path = route !== null ? `/api/${route}` : url.pathname;
+  const query = Object.fromEntries([...url.searchParams].filter(([k]) => k !== 'route'));
 
   const send = (status: number, payload: unknown, cookies: string[] = []) => {
     res.statusCode = status;
@@ -55,6 +56,7 @@ export async function serveNode(req: IncomingMessage & { body?: unknown }, res: 
   const apiReq: ApiRequest = {
     method: (req.method ?? 'GET').toUpperCase(),
     path,
+    query,
     headers: {
       cookie: header(req, 'cookie'),
       origin: header(req, 'origin'),

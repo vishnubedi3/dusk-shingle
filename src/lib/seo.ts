@@ -24,23 +24,29 @@ export function canonicalUrl(path: string): string {
 
 /**
  * Canonical pathname for a rendered app route, or null when the page must not
- * carry a canonical URL and must not be indexed (account management,
- * moderation, unknown chapters, not-found).
+ * carry a canonical URL and must not be indexed.
+ *
+ * Two decisions worth stating. The community index is indexed; a *filtered* or
+ * searched view is not, because the same discussions appear under many such
+ * addresses. Individual discussions are not indexed either — they are
+ * user-written, unbounded in number, and a title can spoil. They are still
+ * linkable and shareable; they are simply not handed to a crawler.
  */
 export function canonicalPathname(route: {
   name: string;
   slug?: string;
   chapter?: unknown;
+  filtered?: boolean;
 }): string | null {
   switch (route.name) {
     case 'library':
       // /library is a duplicate variant of the home page; both canonicalise to /.
       return '/';
-    case 'discussions':
-      return '/discussions';
+    case 'community':
+      return route.filtered ? null : '/community';
     case 'chapter':
       return route.slug && route.chapter ? `/chapter/${encodeURIComponent(route.slug)}` : null;
-    case 'discussion':
+    case 'chapter-thread':
       return route.slug && route.chapter ? `/chapter/${encodeURIComponent(route.slug)}/discussion` : null;
     default:
       return null;
@@ -72,8 +78,8 @@ export function publishedIsoDate(label: string | undefined): string | undefined 
 /**
  * Every canonical, publicly indexable URL, derived from the published chapters
  * in the content source. Private surfaces (account, moderation, API), duplicate
- * variants (/library), drafts and unpublished catalog entries are excluded by
- * construction.
+ * variants (/library), the filtered community views, individual discussions,
+ * drafts and unpublished catalog entries are excluded by construction.
  */
 export function sitemapEntries(): SitemapEntry[] {
   const chapters = getPublishedChapters();
@@ -82,8 +88,7 @@ export function sitemapEntries(): SitemapEntry[] {
 
   const entries: SitemapEntry[] = [
     { loc: canonicalUrl('/'), lastmod: latest },
-    { loc: canonicalUrl('/discussions') },
-    // Discussion rooms change with comments; only the publication date is known.
+    { loc: canonicalUrl('/community') },
     ...chapters.map((c): SitemapEntry => ({ loc: canonicalUrl(`/chapter/${c.slug}`), lastmod: publishedIsoDate(c.publishedLabel) })),
     ...chapters.map((c): SitemapEntry => ({ loc: canonicalUrl(`/chapter/${c.slug}/discussion`) })),
   ];

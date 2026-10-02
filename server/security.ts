@@ -60,6 +60,33 @@ export function countUrls(text: string): number {
   return (text.match(/https?:\/\/|www\./gi) ?? []).length;
 }
 
+const MAX_TAGS = 6;
+const MAX_TAG_LENGTH = 32;
+
+/**
+ * Normalise free-form tag input to unique, lower-case, URL-safe slugs.
+ * Rejecting rather than silently rewriting is the caller's job; this only
+ * guarantees the stored shape, so a tag is one value however it was typed.
+ */
+export function normaliseTags(input: unknown): string[] {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) throw new Error('tags');
+  const seen = new Set<string>();
+  for (const raw of input.slice(0, MAX_TAGS * 2)) {
+    if (typeof raw !== 'string') continue;
+    const tag = raw
+      .normalize('NFKD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, MAX_TAG_LENGTH)
+      .replace(/-+$/g, '');
+    if (tag) seen.add(tag);
+  }
+  return [...seen].slice(0, MAX_TAGS);
+}
+
 /**
  * Key material for the IP rate-limit buckets.
  *

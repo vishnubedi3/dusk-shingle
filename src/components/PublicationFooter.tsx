@@ -18,7 +18,8 @@ export function PublicationFooter({ showTitleNote = true }: { showTitleNote?: bo
         )}
         <nav className="footer-links" aria-label="Site">
           <Link href="/">Library</Link>
-          <Link href="/discussions">Discussions</Link>
+          <Link href="/community">Community</Link>
+          <Link href="/community/new">Start a discussion</Link>
           <Link href="/account">Account</Link>
         </nav>
         <p className="footer-fine">No analytics, no trackers, no advertising. Anonymous by design.</p>

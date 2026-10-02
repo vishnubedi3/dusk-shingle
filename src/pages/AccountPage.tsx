@@ -6,7 +6,6 @@ import { PublicationFooter } from '../components/PublicationFooter';
 import { useReader, type SyncStatus } from '../lib/reader';
 import { api, ApiFailure } from '../lib/api';
 import { relativeTime } from '../lib/format';
-import { getPublishedChapters } from '../content/chapters';
 
 const SYNC_TEXT: Record<SyncStatus, { title: string; text: string; tone: 'quiet' | 'caution' | 'error' }> = {
   local: { title: 'On this device', text: 'Reading state is stored in this browser only.', tone: 'quiet' },
@@ -158,7 +157,10 @@ function KeyReveal({ readerKey, onDone }: { readerKey: string; onDone: () => voi
   );
 }
 
-type Notifications = { replies: { id: string; chapterSlug: string; author: string | null; createdAt: string; unread: boolean }[]; moderated: { id: string; chapterSlug: string; state: string }[] };
+type Notifications = {
+  replies: { id: string; discussionId: string; title: string | null; author: string | null; createdAt: string; unread: boolean }[];
+  moderated: { id: string; discussionId: string | null; title: string | null; state: string }[];
+};
 
 function SignedIn() {
   const { account, sync, syncNow, signOut, deleteAccount, signIn, setUnreadReplies } = useReader();
@@ -170,7 +172,6 @@ function SignedIn() {
   const [unlockKey, setUnlockKey] = useState('');
   const id = useId();
   const status = SYNC_TEXT[sync];
-  const titleOf = (slug: string) => getPublishedChapters().find((c) => c.slug === slug)?.title ?? slug;
 
   const loadNotes = useCallback(() => {
     setNotes(undefined);
@@ -225,15 +226,19 @@ function SignedIn() {
             {notesError}
           </Notice>
         ) : !notes ? <p className="meta loading">Loading…</p> : notes.replies.length === 0 && notes.moderated.length === 0 ? (
-          <p>Nothing new. You are only notified of direct replies and moderation of your own comments.</p>
+          <p>Nothing new. You are only notified of direct replies and moderation of your own posts.</p>
         ) : (
           <ul className="plain-list">
             {notes.moderated.map((m) => (
-              <li key={m.id}><Link href={`/chapter/${m.chapterSlug}/discussion`}>A comment on “{titleOf(m.chapterSlug)}” is {m.state === 'removed' ? 'removed by moderators' : 'hidden pending review'}</Link></li>
+              <li key={m.id}>
+                <Link href={m.discussionId ? `/community/${m.discussionId}` : '/community'}>
+                  {m.title ? `“${m.title}”` : 'A discussion you wrote'} is {m.state === 'removed' ? 'removed by moderators' : 'hidden pending review'}
+                </Link>
+              </li>
             ))}
             {notes.replies.map((r) => (
               <li key={r.id} data-unread={r.unread || undefined}>
-                <Link href={`/chapter/${r.chapterSlug}/discussion`}>{r.author ?? 'A reader'} replied in “{titleOf(r.chapterSlug)}”</Link>
+                <Link href={`/community/${r.discussionId}`}>{r.author ?? 'A reader'} replied in “{r.title ?? 'a discussion'}”</Link>
                 <span className="meta"> · {relativeTime(r.createdAt)}</span>
               </li>
             ))}
@@ -254,8 +259,9 @@ function SignedIn() {
       <section className="account-section danger-zone" aria-labelledby={`${id}-del`}>
         <h2 id={`${id}-del`} className="meta-label">Delete account</h2>
         <p>
-          Permanently deletes your account, pseudonym, sessions, encrypted reading state, marks and reports. Your comments are deleted; where
-          others have replied, the comment is replaced by “deleted by its author” with no name attached, so their replies keep their place.
+          Permanently deletes your account, pseudonym, sessions, encrypted reading state, marks and reports. Your discussions
+          and replies are deleted; where others have replied, your post is replaced by “deleted by its author” with no name
+          attached, so their replies keep their place.
         </p>
         <form onSubmit={async (e) => {
           e.preventDefault();
@@ -287,11 +293,11 @@ function Principles() {
       <h2 id="principles-title" className="meta-label">How this works</h2>
       <dl>
         <dt>What the server knows</dt>
-        <dd>A one-way hash of a value derived from your key, your generated pseudonym, your public comments, and an encrypted blob it cannot read.</dd>
+        <dd>A one-way hash of a value derived from your key, your generated pseudonym, your public posts, and an encrypted blob it cannot read.</dd>
         <dt>What only your devices know</dt>
         <dd>Your reader key, and the key that decrypts your reading positions, private notes and settings.</dd>
         <dt>What is public</dt>
-        <dd>Comments are public and are not end-to-end encrypted — the server must read them to show and moderate them.</dd>
+        <dd>Your discussions and replies are public and are not end-to-end encrypted — the server must read them to show and moderate them.</dd>
         <dt>What is not collected</dt>
         <dd>No email, phone, name, contacts, analytics, trackers or advertising identifiers.</dd>
       </dl>

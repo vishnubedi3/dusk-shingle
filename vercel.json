@@ -4,7 +4,8 @@
   },
   "redirects": [
     { "source": "/index.html", "destination": "/", "permanent": true },
-    { "source": "/library", "destination": "/", "permanent": true }
+    { "source": "/library", "destination": "/", "permanent": true },
+    { "source": "/discussions", "destination": "/community", "permanent": true }
   ],
   "rewrites": [
     { "source": "/api/:route(.*)", "destination": "/api/router?route=:route" },

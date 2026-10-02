@@ -1,15 +1,23 @@
 import { useEffect, useState } from 'react';
 import { Link } from './Link';
 import { ReadingControls } from './ReadingControls';
+import { getPublishedChapters } from '../content/chapters';
 import { useReader } from '../lib/reader';
 
 type Props = { pathname: string; readingTitle?: string };
 
 export function SiteHeader({ pathname, readingTitle }: Props) {
-  const { account, unreadReplies } = useReader();
+  const { account, unreadReplies, vault } = useReader();
   const reading = Boolean(readingTitle);
   const hidden = useHideOnScroll(reading);
   const is = (p: string | RegExp) => (typeof p === 'string' ? pathname === p : p.test(pathname));
+
+  // "Continue reading" appears only once there is somewhere to continue to, so
+  // the navigation stays short for a reader who has not begun.
+  const chapters = getPublishedChapters();
+  const started = chapters.some((c) => (vault.chapters[c.slug]?.progress ?? 0) > 0);
+  const nextUnread = chapters.find((c) => !vault.chapters[c.slug]?.completed);
+  const continueHref = started && nextUnread ? `/chapter/${nextUnread.slug}` : undefined;
 
   return (
     <header className="masthead" data-reading={reading || undefined} data-hidden={hidden || undefined}>
@@ -22,8 +30,16 @@ export function SiteHeader({ pathname, readingTitle }: Props) {
         {reading && <p className="masthead-context" aria-hidden="true">{readingTitle}</p>}
         <nav className="nav" aria-label="Primary">
           <Link href="/" aria-current={is('/') || is('/library') ? 'page' : undefined}>Library</Link>
-          <Link href="/discussions" aria-current={is('/discussions') || is(/\/discussion$/) ? 'page' : undefined}>
-            <span className="nav-long">Discussions</span><span className="nav-short">Discuss</span>
+          {continueHref && (
+            <Link className="nav-continue" href={continueHref} aria-current={pathname === continueHref ? 'page' : undefined}>
+              <span className="nav-long">Continue reading</span><span className="nav-short">Read</span>
+            </Link>
+          )}
+          <Link
+            href="/community"
+            aria-current={is('/community') || is(/^\/community(\/|$)/) || is(/\/discussion$/) ? 'page' : undefined}
+          >
+            <span className="nav-long">Community</span><span className="nav-short">Forum</span>
           </Link>
           <Link href="/account" aria-current={is('/account') ? 'page' : undefined}>
             {account ? 'You' : 'Account'}

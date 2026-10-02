@@ -17,11 +17,11 @@ const sitemapXml = readFileSync(fileURLToPath(new URL('../../public/sitemap.xml'
 describe('canonical URLs', () => {
   it('points every canonical URL at the production origin', () => {
     expect(canonicalUrl('/')).toBe(`${PUBLIC_ORIGIN}/`);
-    expect(canonicalUrl('/discussions')).toBe(`${PUBLIC_ORIGIN}/discussions`);
+    expect(canonicalUrl('/community')).toBe(`${PUBLIC_ORIGIN}/community`);
   });
 
   it('strips trailing slashes to avoid duplicate variants', () => {
-    expect(canonicalPath('/discussions/')).toBe('/discussions');
+    expect(canonicalPath('/community/')).toBe('/community');
     expect(canonicalUrl('/chapter/the-dry-pump/')).toBe(`${PUBLIC_ORIGIN}/chapter/the-dry-pump`);
   });
 
@@ -30,13 +30,13 @@ describe('canonical URLs', () => {
     expect(canonicalPathname({ name: 'library' })).toBe(canonicalPathname({ name: 'library', slug: undefined }));
   });
 
-  it('builds chapter and discussion canonicals from the published slug', () => {
+  it('builds chapter and chapter-discussion canonicals from the published slug', () => {
     const chapter = { title: 'THE DRY PUMP' };
     expect(canonicalPathname({ name: 'chapter', slug: 'the-dry-pump', chapter })).toBe('/chapter/the-dry-pump');
-    expect(canonicalPathname({ name: 'discussion', slug: 'the-dry-pump', chapter })).toBe(
+    expect(canonicalPathname({ name: 'chapter-thread', slug: 'the-dry-pump', chapter })).toBe(
       '/chapter/the-dry-pump/discussion',
     );
-    expect(canonicalPathname({ name: 'discussions' })).toBe('/discussions');
+    expect(canonicalPathname({ name: 'community' })).toBe('/community');
   });
 
   it('gives private, unknown and not-found pages no canonical URL', () => {
@@ -44,8 +44,17 @@ describe('canonical URLs', () => {
     expect(canonicalPathname({ name: 'moderation' })).toBeNull();
     expect(canonicalPathname({ name: 'not-found' })).toBeNull();
     expect(canonicalPathname({ name: 'chapter', slug: 'the-dry-pump' })).toBeNull();
-    expect(canonicalPathname({ name: 'discussion', slug: 'the-dry-pump' })).toBeNull();
+    expect(canonicalPathname({ name: 'chapter-thread', slug: 'the-dry-pump' })).toBeNull();
     expect(canonicalPathname({ name: 'chapter', slug: 'not-a-real-chapter', chapter: undefined })).toBeNull();
+  });
+
+  it('keeps filtered and searched community views, and individual discussions, out of the index', () => {
+    // The same discussions appear under many filtered addresses; indexing them
+    // all would dilute the one address that matters.
+    expect(canonicalPathname({ name: 'community', filtered: true })).toBeNull();
+    // A discussion is reader-written, unbounded, and its title can spoil.
+    expect(canonicalPathname({ name: 'thread' })).toBeNull();
+    expect(canonicalPathname({ name: 'new-discussion' })).toBeNull();
   });
 });
 
@@ -66,9 +75,9 @@ describe('public sitemap entries', () => {
   const entries = sitemapEntries();
   const locs = entries.map((e) => e.loc);
 
-  it('lists the home, discussions index, and every published chapter page and its discussion room', () => {
+  it('lists the home, the community, and every published chapter page and its discussion room', () => {
     expect(locs).toContain(`${PUBLIC_ORIGIN}/`);
-    expect(locs).toContain(`${PUBLIC_ORIGIN}/discussions`);
+    expect(locs).toContain(`${PUBLIC_ORIGIN}/community`);
     expect(locs).toContain(`${PUBLIC_ORIGIN}/chapter/the-dry-pump`);
     expect(locs).toContain(`${PUBLIC_ORIGIN}/chapter/the-dry-pump/discussion`);
     expect(entries.length).toBe(2 + 2 * locs.filter((l) => /\/chapter\/[^/]+$/.test(l)).length);
@@ -77,6 +86,15 @@ describe('public sitemap entries', () => {
   it('excludes private, account-management, moderation, API and duplicate routes', () => {
     for (const forbidden of ['/account', '/moderation', '/api', '/library', '/vault', '/session', '/notifications', '/reports']) {
       expect(locs.some((l) => l === `${PUBLIC_ORIGIN}${forbidden}` || l.includes(`${forbidden}/`))).toBe(false);
+    }
+  });
+
+  it('does not list the retired discussions index, or any address the community filters by', () => {
+    // /discussions is a permanent redirect to /community, not a page of its own.
+    expect(locs).not.toContain(`${PUBLIC_ORIGIN}/discussions`);
+    for (const l of locs) {
+      expect(l).not.toMatch(/\/community\/(c|t|new)\//);
+      expect(l).not.toMatch(/\?/);
     }
   });
 
@@ -100,8 +118,8 @@ describe('public sitemap entries', () => {
 
   it('keeps sitemap URLs consistent with page canonicals', () => {
     const chapter = { title: 'THE DRY PUMP' };
-    for (const path of ['/', '/discussions', '/chapter/the-dry-pump', '/chapter/the-dry-pump/discussion']) {
-      const name = path === '/' ? 'library' : path === '/discussions' ? 'discussions' : path.endsWith('/discussion') ? 'discussion' : 'chapter';
+    for (const path of ['/', '/community', '/chapter/the-dry-pump', '/chapter/the-dry-pump/discussion']) {
+      const name = path === '/' ? 'library' : path === '/community' ? 'community' : path.endsWith('/discussion') ? 'chapter-thread' : 'chapter';
       const slug = path.startsWith('/chapter/') ? 'the-dry-pump' : undefined;
       expect(locs).toContain(canonicalUrl(canonicalPathname({ name, slug, chapter })!));
     }
@@ -137,7 +155,7 @@ describe('committed robots.txt', () => {
     expect(robotsTxt).toMatch(/^Disallow: \/api$/m);
     expect(robotsTxt).not.toMatch(/^Disallow: \/$/m);
     expect(robotsTxt).not.toMatch(/^Disallow: \/chapter/m);
-    expect(robotsTxt).not.toMatch(/^Disallow: \/discussions/m);
+    expect(robotsTxt).not.toMatch(/^Disallow: \/community/m);
   });
 
   it('points at the production sitemap and holds no secrets', () => {
@@ -169,6 +187,11 @@ describe('committed vercel.json', () => {
     const redirects: Array<{ source: string; destination: string; permanent?: boolean }> = vercel.redirects ?? [];
     expect(redirects).toContainEqual({ source: '/library', destination: '/', permanent: true });
     expect(redirects).toContainEqual({ source: '/index.html', destination: '/', permanent: true });
+  });
+
+  it('sends the retired discussions index to the community, so old links and bookmarks land', () => {
+    const redirects: Array<{ source: string; destination: string; permanent?: boolean }> = vercel.redirects ?? [];
+    expect(redirects).toContainEqual({ source: '/discussions', destination: '/community', permanent: true });
   });
 
   it('serves robots.txt and sitemap.xml as real files, never the SPA fallback', () => {

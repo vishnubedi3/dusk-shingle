@@ -1,3 +1,4 @@
+import { migrateForum } from './migrate.js';
 import { schemaSql } from './schema.js';
 
 export type Row = Record<string, unknown>;
@@ -9,10 +10,21 @@ export interface Db {
   transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>;
 }
 
+/** Create anything missing, then bring an existing database up to the current model. */
 export async function applySchema(db: Db): Promise<void> {
-  for (const statement of schemaSql.split(';').map((s) => s.trim()).filter(Boolean)) {
+  // Line comments are stripped before splitting: this runs on every cold start,
+  // and a semicolon inside a comment would otherwise be parsed as a statement
+  // boundary and take the whole schema down with it. No literal in schemaSql
+  // contains "--", so this cannot cut a string in half.
+  const statements = schemaSql
+    .replace(/--[^\n]*/g, '')
+    .split(';')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const statement of statements) {
     await db.query(statement);
   }
+  await migrateForum(db);
 }
 
 let productionDb: Promise<Db> | undefined;

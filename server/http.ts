@@ -5,6 +5,8 @@ export type ApiRequest = {
   headers: Record<string, string | undefined>;
   body: unknown;
   ip: string;
+  /** Query parameters, already decoded. Empty for requests without a query string. */
+  query?: Record<string, string>;
 };
 
 export type ApiResponse = {

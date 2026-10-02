@@ -28,11 +28,29 @@ CREATE TABLE IF NOT EXISTS vaults (
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- Registries, not code. A new category becomes available by inserting a row, so
+-- the forum is not limited to the set seeded in server/migrate.ts.
+CREATE TABLE IF NOT EXISTS categories (
+  slug        text PRIMARY KEY,
+  name        text NOT NULL,
+  description text NOT NULL DEFAULT '',
+  position    integer NOT NULL DEFAULT 100
+);
+
+-- One table, two shapes. A *discussion* is a row with parent_id IS NULL; a
+-- *reply* is a row with parent_id set. Discussions carry the community metadata
+-- (title, category, tags, optional chapter association); replies carry none of
+-- it. The discussion "scope" is therefore derived, never stored: a chapter_slug
+-- means a chapter discussion, NULL means a community-wide one.
 CREATE TABLE IF NOT EXISTS comments (
   id               uuid PRIMARY KEY,
-  chapter_slug     text NOT NULL,
+  chapter_slug     text,
   parent_id        uuid REFERENCES comments(id) ON DELETE CASCADE,
   account_id       uuid REFERENCES accounts(id) ON DELETE SET NULL,
+  title            text,
+  category         text REFERENCES categories(slug) ON DELETE SET NULL,
+  tags             text[],
+  is_chapter_room  boolean NOT NULL DEFAULT false,
   body             text NOT NULL CHECK (length(body) <= 4000),
   reveals_through  integer NOT NULL CHECK (reveals_through >= 1),
   has_spoiler      boolean NOT NULL DEFAULT false,
@@ -41,10 +59,24 @@ CREATE TABLE IF NOT EXISTS comments (
   edited_at        timestamptz,
   deleted_at       timestamptz
 );
+
+-- The chapter association becomes optional: that is what lets a discussion
+-- exist without a chapter at all. Additive and idempotent, so a database that
+-- predates the community forum reaches the current shape on its next start.
+ALTER TABLE comments ALTER COLUMN chapter_slug DROP NOT NULL;
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS title text;
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS category text;
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS tags text[];
+ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_chapter_room boolean NOT NULL DEFAULT false;
+
 CREATE INDEX IF NOT EXISTS comments_chapter_idx ON comments(chapter_slug, created_at);
 CREATE INDEX IF NOT EXISTS comments_parent_idx ON comments(parent_id);
 CREATE INDEX IF NOT EXISTS comments_account_idx ON comments(account_id);
-
+CREATE INDEX IF NOT EXISTS comments_roots_idx ON comments(created_at DESC, id DESC) WHERE parent_id IS NULL;
+CREATE INDEX IF NOT EXISTS comments_category_idx ON comments(category, created_at DESC) WHERE parent_id IS NULL;
+CREATE INDEX IF NOT EXISTS comments_tags_idx ON comments USING gin (tags) WHERE parent_id IS NULL;
+-- At most one designated discussion per chapter, enforced by the database.
+CREATE UNIQUE INDEX IF NOT EXISTS comments_chapter_room_idx ON comments(chapter_slug) WHERE is_chapter_room;
 CREATE TABLE IF NOT EXISTS reactions (
   comment_id  uuid NOT NULL REFERENCES comments(id) ON DELETE CASCADE,
   account_id  uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,

@@ -1,4 +1,6 @@
 /* ═══ Masthead ═══════════════════════════════════════════════════════════ */
+/* The masthead and footer sit on their own opaque paper, so each has to carry
+   the grain itself — otherwise the texture stops dead at the page edges. */
 .masthead {
   position: sticky; top: 0; z-index: 30;
   background-color: var(--surface-page);
@@ -277,6 +279,9 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 .chapter-end[data-complete='true'] .chapter-end-status { color: var(--accent); }
 .chapter-end-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-3); margin-top: var(--space-6); }
 .note-open { margin-top: var(--space-6); }
+.chapter-discussion { margin-top: var(--space-8); padding-top: var(--space-6); border-top: var(--hairline) solid var(--rule); text-align: left; }
+.chapter-discussion-text { max-width: 36em; margin-top: var(--space-3); font-family: var(--font-serif); font-size: var(--text-body); line-height: 1.6; color: var(--ink-2); }
+.chapter-discussion .row-actions { justify-content: flex-start; }
 .private-note { margin-top: var(--space-7); text-align: left; }
 .private-note-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
 .private-note textarea { margin-block: var(--space-2); }
@@ -340,6 +345,7 @@ legend { margin-bottom: var(--space-2); padding: 0; }
   .prose { grid-column: 2; width: min(100%, var(--prose-measure)); }
 }
 
+
 /* ═══ Reading controls ══════════════════════════════════════════════════ */
 .controls { position: relative; }
 .controls-panel {
@@ -391,16 +397,15 @@ legend { margin-bottom: var(--space-2); padding: 0; }
   .segmented, .segmented button { border-radius: var(--radius-1); }
 }
 
-/* ═══ Standalone pages (account, errors, discussions index) ═══════════ */
-.standalone, .account, .discussions, .moderation, .discussion { padding-block: var(--space-8) var(--space-9); }
-.standalone, .account, .moderation, .discussion { max-width: var(--text-max); }
+/* ═══ Standalone pages (account, errors, community, thread) ═════════════ */
+.standalone, .account, .moderation, .community, .thread { padding-block: var(--space-8) var(--space-9); }
+.standalone, .account, .moderation, .thread { max-width: var(--text-max); }
+.community { max-width: 62rem; }
 .standalone-title {
   margin-block: var(--space-4) var(--space-4);
   font-family: var(--font-serif); font-weight: 400; font-size: clamp(2rem, 1.5rem + 2.2vw, 3rem); line-height: 1.08;
   letter-spacing: var(--track-display); font-variation-settings: 'opsz' 60; text-wrap: balance;
 }
-/* A pseudonym is a generated token, not a byline, so it speaks in mono — which
-   also keeps it from being confused with the prose of the post itself. */
 .standalone-title.handle {
   font-family: var(--font-mono); font-weight: 500; font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.125rem);
   letter-spacing: 0; font-variation-settings: normal; overflow-wrap: anywhere;
@@ -455,9 +460,101 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 .principles dd { margin: var(--space-1) 0 0; padding-bottom: var(--space-4); border-bottom: var(--hairline) solid var(--rule); color: var(--ink-2); font-family: var(--font-serif); font-size: var(--text-body); line-height: 1.6; max-width: 42em; }
 .principles dd:last-child { border-bottom: 0; }
 
-/* ═══ Discussion ═════════════════════════════════════════════════════════ */
+/* ═══ Community ══════════════════════════════════════════════════════════ */
+.community-head { padding-bottom: var(--space-7); }
+.community-head .standalone-text { max-width: 38em; }
+.community-section { margin-top: var(--space-9); }
+.community-section > .meta-label { padding-bottom: var(--space-3); border-bottom: var(--hairline) solid var(--ink); }
+.empty-line { padding-block: var(--space-5); font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+
+/* Search is a means, not the subject: it sits at the width of a line of the
+   page rather than spanning it, so it cannot be mistaken for the main event. */
+.search { display: flex; gap: var(--space-2); margin-top: var(--space-6); max-width: 34rem; }
+.search input { flex: 1 1 12rem; }
+.search .btn { flex: none; }
+@media (max-width: 30rem) { .search { flex-direction: column; align-items: stretch; } }
+
+.category-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  border-top: var(--hairline) solid var(--rule); margin-top: var(--space-4);
+}
+.category-grid li { border-bottom: var(--hairline) solid var(--rule); }
+.category-card {
+  display: grid; gap: var(--space-2); align-content: start; height: 100%;
+  padding: var(--space-5) var(--space-5) var(--space-5) 0; text-decoration: none;
+  transition: background-color var(--dur-1) var(--ease);
+}
+.category-name { font-family: var(--font-serif); font-size: var(--text-h3); color: var(--ink); letter-spacing: var(--track-tight); }
+.category-text { font-size: var(--text-ui); line-height: 1.55; color: var(--ink-3); }
+.category-count { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+.category-card:hover .category-name { text-decoration: underline; text-decoration-thickness: var(--hairline); text-underline-offset: 0.2em; }
+
+.thread-list { margin-top: var(--space-4); }
+.thread-row { padding-block: var(--space-5); border-bottom: var(--hairline) solid var(--rule); }
+.thread-where { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-2); }
+.thread-category { font-family: var(--font-mono); font-size: var(--text-micro); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--accent); }
+.thread-meta { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+.thread-title { margin: 0; font-family: var(--font-serif); font-weight: 400; font-size: 1.375rem; line-height: 1.28; letter-spacing: var(--track-tight); font-variation-settings: 'opsz' 36; }
+.thread-title a { color: var(--ink); text-decoration: none; }
+.thread-title a:hover { text-decoration: underline; text-decoration-thickness: var(--hairline); text-underline-offset: 0.2em; }
+/* A title held back reads as withheld data, not as a book title — the same
+   instinct as the redaction bar over a spoiler. */
+.thread-title.is-concealed { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+.thread-reveal { margin-left: var(--space-3); font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+.thread-reveal:hover { color: var(--ink); }
+
+.thread-tags { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.tag {
+  display: inline-flex; align-items: center; gap: 0.35em; min-height: 1.75rem; padding: 0 var(--space-3);
+  font-family: var(--font-mono); font-size: var(--text-micro); letter-spacing: 0.02em;
+  color: var(--ink-3); text-decoration: none; border: var(--hairline) solid var(--rule); border-radius: var(--radius-1);
+  transition: color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.tag:hover { color: var(--ink); border-color: var(--ink-3); }
+.tag .count { font-size: var(--text-micro); opacity: 0.7; }
+button.tag.is-button { background: none; cursor: pointer; text-transform: none; font-size: var(--text-meta); }
+button.tag.is-button:hover { background: var(--surface-sunk); }
+
+.chapter-list { margin-top: var(--space-4); }
+.chapter-list > li { border-bottom: var(--hairline) solid var(--rule); }
+.chapter-row {
+  display: grid; grid-template-columns: 7rem 1fr auto; align-items: baseline; gap: var(--space-4);
+  padding: var(--space-4) 0; min-height: 2.75rem; text-decoration: none;
+}
+.chapter-num { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); }
+.chapter-title { font-family: var(--font-serif); font-size: var(--text-body); color: var(--ink); }
+.chapter-row:hover .chapter-title { text-decoration: underline; text-decoration-thickness: var(--hairline); text-underline-offset: 0.2em; }
+.chapter-meta { font-family: var(--font-mono); font-size: var(--text-meta); color: var(--ink-3); white-space: nowrap; }
+@media (max-width: 40rem) {
+  .chapter-row { grid-template-columns: 1fr; row-gap: var(--space-1); }
+  .chapter-meta { white-space: normal; }
+  .thread-title { font-size: 1.25rem; }
+}
+
+.load-more { display: flex; justify-content: center; padding-block: var(--space-6); }
+.back-to-top { padding-block: var(--space-4) var(--space-8); }
+
+.composer-new { border-bottom: 0; gap: var(--space-6); }
+.field { display: grid; gap: var(--space-2); }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); }
+@media (max-width: 40rem) { .field-row { grid-template-columns: 1fr; } }
+.composer-new select { width: 100%; }
+.composer-new .btn-quiet { margin-right: auto; }
+.field-hint { max-width: 44em; font-size: var(--text-meta); line-height: 1.5; color: var(--ink-3); }
+
+/* ═══ Discussion and its replies ════════════════════════════════════════ */
 .discussion-head { padding-bottom: var(--space-6); border-bottom: var(--hairline) solid var(--ink); }
 .discussion-title { margin-block: var(--space-3); font-family: var(--font-serif); font-weight: 400; font-size: clamp(2rem, 1.5rem + 2vw, 2.75rem); line-height: 1.1; letter-spacing: var(--track-display); font-variation-settings: 'opsz' 60; }
+/* Which chapter a discussion belongs to is front matter, set as a running
+   head rather than a second title competing with the discussion's own. It is
+   bound to the label above it and held clear of the body text below, so it
+   cannot read as a third heading. */
+.discussion-of {
+  margin-block: var(--space-1) var(--space-5);
+  font-family: var(--font-mono); font-size: var(--text-micro); font-weight: 500;
+  letter-spacing: var(--track-label); text-transform: uppercase; color: var(--ink-3);
+}
+.discussion-title.is-loading { background: var(--surface-sunk); color: transparent; border-radius: var(--radius-1); user-select: none; }
 .discussion-scope { max-width: 36em; font-size: var(--text-ui); line-height: 1.6; color: var(--ink-2); }
 .gate { margin-top: var(--space-6); padding: var(--space-6); background: var(--surface-sunk); }
 .gate-title { font-family: var(--font-serif); font-size: var(--text-h3); margin-bottom: var(--space-2); }
@@ -474,6 +571,8 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 .threads > .thread { border-bottom: var(--hairline) solid var(--rule); }
 .comment { padding-block: var(--space-5); }
 .comment-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3); margin-bottom: var(--space-2); }
+/* A pseudonym is a generated token, not a byline, so it speaks in mono — which
+   also keeps it from being confused with the prose of the post itself. */
 .comment-author { font-family: var(--font-mono); font-size: var(--text-meta); font-weight: 500; letter-spacing: 0.01em; color: var(--ink-2); }
 .comment-you { font-style: normal; font-family: var(--font-mono); font-size: var(--text-meta); color: var(--accent); }
 /* A post is prose someone took the time to write, so it gets the same measure
@@ -493,6 +592,7 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 .comment.is-folded .btn-quiet { padding-left: 0; min-height: 2.25rem; }
 .replies { margin-left: var(--space-3); padding-left: var(--space-5); border-left: var(--hairline) solid var(--rule); }
 .replies .comment-text { font-size: 1.0625rem; }
+.replies .comment:first-child { padding-top: var(--space-3); }
 @media (max-width: 30rem) { .replies { margin-left: 0; padding-left: var(--space-4); } }
 
 /* Spoiler: a redaction bar, revealed on demand */
@@ -507,8 +607,6 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 .report .btn { justify-self: start; }
 
 /* ═══ Footer ═════════════════════════════════════════════════════════════ */
-/* The masthead and footer sit on their own opaque paper, so each has to carry
-   the grain itself — otherwise the texture stops dead at the page edges. */
 .footer {
   background-color: var(--surface-sunk); background-image: var(--grain);
   border-top: var(--hairline) solid var(--rule);
@@ -519,7 +617,7 @@ legend { margin-bottom: var(--space-2); padding: 0; }
 /* The footer keeps its compact measure, but each link's hit area is grown to a
    full touch target with an overlay rather than by padding the row out. */
 .footer-links a { position: relative; display: inline-flex; align-items: center; min-height: 1.5rem; color: var(--ink-2); text-decoration: none; }
-.footer-links a::after { content: ''; position: absolute; left: -0.35rem; right: -0.35rem; top: 50%; height: 2.75rem; transform: translateY(-50%); }
+.footer-links a::after, .footer-title-note a::after { content: ''; position: absolute; left: -0.35rem; right: -0.35rem; top: 50%; height: 2.75rem; transform: translateY(-50%); }
 .footer-links a:hover { color: var(--ink); text-decoration: underline; }
 .footer .wordmark-small { position: relative; min-height: 1.5rem; }
 .footer .wordmark-small::after { content: ''; position: absolute; left: 0; right: var(--space-6); top: 50%; height: 2.75rem; transform: translateY(-50%); }

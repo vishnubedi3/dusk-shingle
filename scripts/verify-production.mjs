@@ -114,35 +114,112 @@ check(
   unknown.status === 401 && unknown.data?.error?.code === 'unknown_key',
 );
 
-// ── Site + chapter discussions ───────────────────────────────────────────────
-const disc = await api('GET', '/api/discussions');
-check('site-wide discussions load', disc.status === 200 && Array.isArray(disc.data?.chapters), `${disc.data?.chapters?.length} chapter room(s)`);
+// ── Community forum ─────────────────────────────────────────────────────────
+const forum = await api('GET', '/api/forum');
+check(
+  'community index loads with categories, chapter rooms and an index feed',
+  forum.status === 200 && Array.isArray(forum.data?.categories) && Array.isArray(forum.data?.latest) && Array.isArray(forum.data?.chapterRooms),
+  `${forum.data?.categories?.length} categories, ${forum.data?.latest?.length} latest, ${forum.data?.total} total`,
+);
+check(
+  'the retired /discussions index redirects to the community',
+  (await fetch(`${BASE}/discussions`, { redirect: 'manual' })).headers.get('location') === '/community',
+);
 
-const comment = await api('POST', `/api/chapters/${CHAPTER}/comments`, { body: `Production verification comment ${stamp}.` });
-check('create chapter comment', comment.status === 201, `id=${comment.data?.id}`);
-const commentId = comment.data?.id;
+const communitySlug = forum.data?.categories?.[0]?.slug ?? 'general';
+const stampTag = `verify${stamp}`;
 
-const reply = await api('POST', `/api/chapters/${CHAPTER}/comments`, { body: `Production verification reply ${stamp}.`, parentId: commentId });
-check('create reply', reply.status === 201, `id=${reply.data?.id}`);
+// A discussion with no chapter at all: the thing the old model could not express.
+const opened = await api('POST', '/api/forum/threads', {
+  title: `Production verification discussion ${stamp}`,
+  body: 'A discussion about the novel that belongs to no chapter.',
+  category: communitySlug,
+  tags: [stampTag, 'Chapter 01'],
+  revealsThrough: 1,
+});
+check('start a discussion without a chapter', opened.status === 201, `id=${opened.data?.id}`);
+const discussionId = opened.data?.id;
 
-const listed = await api('GET', `/api/chapters/${CHAPTER}/comments`);
-const mine = (listed.data?.comments ?? []).filter((c) => c.author === created.data?.handle);
-check('comment + reply persist and are returned', listed.status === 200 && mine.length === 2, `${mine.length} of my comments`);
+check('an index entry carries no body text', opened.status === 201 && !(JSON.stringify(forum.data?.latest) ?? '').includes('belongs to no chapter'));
 
-const threaded = (listed.data?.comments ?? []).find((c) => c.id === reply.data?.id);
-check('reply is threaded under its parent', threaded?.parentId === commentId);
+const view = await api('GET', `/api/forum/threads/${discussionId}`);
+check(
+  'a chapter-less discussion is retrievable by its own address',
+  view.status === 200 && view.data?.thread?.scope === 'community' && view.data?.thread?.chapterSlug === null,
+  `scope=${view.data?.thread?.scope} tags=${JSON.stringify(view.data?.thread?.tags)}`,
+);
+check('chapter tags are attached as a tag, not as a chapter binding', (view.data?.thread?.tags ?? []).includes('chapter-01'));
 
-const disc2 = await api('GET', '/api/discussions');
-const room = disc2.data?.chapters?.find((c) => c.slug === CHAPTER);
-check('discussion index reflects the new comments', (room?.comments ?? 0) >= 2, `count=${room?.comments}`);
+const reply = await api('POST', `/api/forum/threads/${discussionId}/comments`, { body: `Production verification reply ${stamp}.` });
+check('reply to a discussion', reply.status === 201, `id=${reply.data?.id}`);
 
-check('public profile is pseudonym only (no credential, no identity)', mine.every((c) => c.author === created.data?.handle) && !listed.text.includes(authKey));
+// A second reader answers that reply. Threads are one level deep, so this must
+// land on the discussion. A separate account is used because a brand-new account
+// is allowed only one discussion and two posts an hour — a limit worth
+// respecting here rather than fighting. The first session is restored
+// afterwards, because creating an account replaces the cookie.
+const firstCookie = cookie;
+const second = await api('POST', '/api/account', { authKey: await deriveAuthKey(newReaderKey()) });
+check('a second reader can take part', second.status === 201, `handle=${second.data?.handle}`);
+const nested = await api('POST', `/api/forum/threads/${discussionId}/comments`, {
+  body: `Production verification nested ${stamp}.`, parentId: reply.data?.id,
+});
+const otherHandle = second.data?.handle;
+cookie = firstCookie;
+const threaded = await api('GET', `/api/forum/threads/${discussionId}`);
+check(
+  'a reply to a reply lands on the discussion',
+  nested.status === 201 && (threaded.data?.replies ?? []).every((r) => r.parentId === discussionId),
+  `${threaded.data?.replies?.length} post(s), all on the discussion`,
+);
+check('both readers are named by pseudonym only', (threaded.data?.replies ?? []).length === 2
+  && new Set((threaded.data?.replies ?? []).map((r) => r.author)).size === 2
+  && (threaded.data?.replies ?? []).some((r) => r.author === otherHandle));
+
+const filtered = await api('GET', `/api/forum/threads?tag=${stampTag}`);
+check('discussions can be found by tag', filtered.status === 200 && (filtered.data?.threads ?? []).some((t) => t.id === discussionId));
+const byCategory = await api('GET', `/api/forum/threads?category=${communitySlug}`);
+check('discussions can be browsed by category', byCategory.status === 200 && (byCategory.data?.threads ?? []).some((t) => t.id === discussionId));
+const searched = await api('GET', `/api/forum/threads?q=${encodeURIComponent(stamp)}`);
+check('discussions can be searched', searched.status === 200 && (searched.data?.threads ?? []).some((t) => t.id === discussionId));
+
+const edited = await api('PATCH', `/api/forum/threads/${discussionId}`, {
+  title: `Production verification discussion ${stamp} (edited)`, body: 'Revised.', category: communitySlug, tags: [stampTag], revealsThrough: 1,
+});
+check('author may edit their own discussion', edited.status === 200 && (await api('GET', `/api/forum/threads/${discussionId}`)).data?.thread?.title?.includes('(edited)'));
+
+// ── Chapter discussions ─────────────────────────────────────────────────────
+const room = await api('GET', `/api/forum/threads/chapter/${CHAPTER}`);
+check(
+  'a chapter discussion is reachable, whether or not anyone has opened it',
+  room.status === 200 && room.data?.chapter?.slug === CHAPTER && (room.data?.room === null || room.data?.room?.isChapterRoom === true),
+  room.data?.room ? `room=${room.data.room.id}` : 'not opened yet',
+);
+if (!room.data?.room) {
+  const first = await api('POST', `/api/forum/threads/chapter/${CHAPTER}`, { body: `Production verification chapter note ${stamp}.` });
+  check('open a chapter discussion', first.status === 201, `id=${first.data?.id}`);
+  const second = await api('POST', `/api/forum/threads/chapter/${CHAPTER}`, { body: `Production verification duplicate ${stamp}.` });
+  check('only one discussion per chapter', second.status === 409, `status=${second.status}`);
+  const roomReply = await api('POST', `/api/forum/threads/chapter/${CHAPTER}/comments`, { body: `Production verification chapter reply ${stamp}.` });
+  check('reply inside a chapter discussion', roomReply.status === 201);
+  const served = await api('GET', `/api/forum/threads/chapter/${CHAPTER}`);
+  check(
+    'chapter discussion and its replies persist, under their original authors',
+    served.status === 200 && served.data?.room?.isChapterRoom === true && served.data?.room?.tags?.includes('chapter-01')
+      && served.data?.replies.some((r) => r.body.includes(stamp)),
+    `${served.data?.replies?.length} post(s)`,
+  );
+}
+
+const listed = await api('GET', '/api/forum/threads?scope=community');
+check('discussions exist without chapters', listed.status === 200 && listed.data.threads.some((t) => t.chapterSlug === null));
+check('public profile is pseudonym only (no credential, no identity)', !JSON.stringify(view.data).includes(authKey));
 
 // ── Authorisation ────────────────────────────────────────────────────────────
-const noSession = await fetch(`${BASE}/api/chapters/${CHAPTER}/comments`, {
+const noSession = await fetch(`${BASE}/api/forum/threads`, {
   method: 'POST',
   headers: { 'X-Dusk-Client': '1', Origin: ORIGIN, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ body: 'should not be accepted' }),
+  body: JSON.stringify({ title: 'should not be accepted', body: 'nope', category: 'general' }),
 });
 check('unauthenticated write rejected', noSession.status === 401);
 
@@ -160,20 +237,24 @@ const crossOrigin = await fetch(`${BASE}/api/account`, {
 });
 check('write from a foreign origin rejected (CSRF)', crossOrigin.status === 403);
 
-check('author may edit their own comment', (await api('PATCH', `/api/comments/${commentId}`, { body: `Production verification comment ${stamp} (edited).` })).status === 200);
+check('author may edit their own reply', (await api('PATCH', `/api/comments/${reply.data?.id}`, { body: `Production verification reply ${stamp} (edited).` })).status === 200);
+// A reply is edited through the comment route, never the discussion route.
+check('a reply may not be edited through the discussion route', (await api('PATCH', `/api/forum/threads/${reply.data?.id}`, { title: 'x', body: 'y', category: 'general' })).status === 400);
+check('a reply may not be deleted through the discussion route', (await api('DELETE', `/api/forum/threads/${reply.data?.id}`)).status === 400);
+check('a new account is told to slow down rather than silently allowed', (await api('POST', '/api/forum/threads', { title: 'One too many', body: 'Rate limit probe.', category: 'general' })).status === 429);
 const mod = await api('GET', '/api/moderation/reports');
 check('moderation queue refused to a non-moderator', mod.status === 403, `status=${mod.status}`);
 const vaultProbe = await api('GET', '/api/vault');
 check('vault readable only for its own account', vaultProbe.status === 200 && 'vault' in vaultProbe.data);
 
 // ── Routing ──────────────────────────────────────────────────────────────────
-for (const path of ['/', '/discussions', '/account', `/chapter/${CHAPTER}`, `/chapter/${CHAPTER}/discussion`, '/moderation', '/no/such/page']) {
+for (const path of ['/', '/community', '/community/new', `/community/c/${communitySlug}`, '/community/t/chapter-01', '/account', `/chapter/${CHAPTER}`, `/chapter/${CHAPTER}/discussion`, '/moderation', '/no/such/page']) {
   const res = await fetch(`${BASE}${path}`, { redirect: 'manual' });
   check(`deep link ${path} resolves after refresh`, res.status === 200, `status=${res.status}`);
 }
-for (const [path, expect] of [['/library', 308], ['/index.html', 308]]) {
+for (const [path, expect, to] of [['/library', 308, '/'], ['/index.html', 308, '/'], ['/discussions', 308, '/community']]) {
   const res = await fetch(`${BASE}${path}`, { redirect: 'manual' });
-  check(`${path} redirects to /`, res.status === expect && res.headers.get('location') === '/', `status=${res.status} loc=${res.headers.get('location')}`);
+  check(`${path} redirects to ${to}`, res.status === expect && res.headers.get('location') === to, `status=${res.status} loc=${res.headers.get('location')}`);
 }
 const html = await (await fetch(`${BASE}/`)).text();
 const js = html.match(/src="(\/assets\/[^"]+\.js)"/)?.[1];
@@ -192,8 +273,13 @@ const leaks = ['DATABASE_URL', 'POSTGRES_URL', 'PGPASSWORD', 'NEON_AUTH_BASE_URL
 const found = leaks.filter((s) => bundle.includes(s));
 check('no database credentials or hosts in the client bundle', found.length === 0, found.length ? `LEAKED: ${found.join(', ')}` : `${bundle.length} bytes scanned`);
 
-// ── Cleanup: remove the verification comments ────────────────────────────────
-for (const c of [reply.data?.id, commentId].filter(Boolean)) await api('DELETE', `/api/comments/${c}`);
+// ── Cleanup: remove everything this run created ──────────────────────────────
+// Replies first, so a discussion nobody else joined is removed outright rather
+// than left behind as a tombstone.
+for (const c of [reply.data?.id, nested.data?.id].filter(Boolean)) await api('DELETE', `/api/comments/${c}`);
+if (discussionId) await api('DELETE', `/api/forum/threads/${discussionId}`);
+const stillThere = (await api('GET', `/api/forum/threads?q=${encodeURIComponent(stamp)}`)).data?.threads ?? [];
+check('verification leaves no discussion behind', stillThere.length === 0, `${stillThere.length} left`);
 
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);
 process.exit(fail === 0 ? 0 : 1);

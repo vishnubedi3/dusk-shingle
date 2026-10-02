@@ -21,6 +21,16 @@ export function readThrough(completedSlugs: string[], numberOf: (slug: string) =
   return completedSlugs.reduce((max, slug) => Math.max(max, numberOf(slug) ?? 0), 0);
 }
 
-/** A comment is folded when it discusses chapters beyond what this reader has finished. */
-export const isFolded = (revealsThrough: number, readerThrough: number, discussionChapter: number) =>
-  revealsThrough > Math.max(readerThrough, discussionChapter);
+/**
+ * A post is folded when it reaches past what the reader has finished, or past
+ * the thread's own declared scope. Taking the larger of the two is what stops a
+ * reader who has finished nothing from having every thread hidden: a discussion
+ * that declares it stays inside chapter 1 is visible to everyone, because that
+ * is the floor the author agreed to, and a chapter's own room is visible to
+ * everyone because the chapter gate has already asked its question.
+ */
+export const isFolded = (revealsThrough: number, readerThrough: number, scopeFloor: number) =>
+  revealsThrough > Math.max(readerThrough, scopeFloor);
+
+/** The lowest chapter a discussion may reach: its own chapter, or the first one. */
+export const scopeFloorOf = (chapterNumber: number | null): number => chapterNumber ?? 1;

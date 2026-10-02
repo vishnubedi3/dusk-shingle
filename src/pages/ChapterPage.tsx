@@ -10,6 +10,7 @@ import { PrivateNote } from '../components/PrivateNote';
 import { useReadingProgress } from '../hooks/useReadingProgress';
 import { useReader } from '../lib/reader';
 import { chapterNumber, readingMinutes } from '../lib/format';
+import { chapterTag } from '../content/catalog';
 import { wordCount } from '../content/chapters';
 
 type Props = { chapter?: Chapter; previous?: Chapter; next?: Chapter };
@@ -123,9 +124,9 @@ function ChapterReader({ chapter, previous, next }: Required<Pick<Props, 'chapte
               ) : (
                 <p className="meta">This is the latest published chapter.</p>
               )}
-              <Link className="btn btn-secondary" href={`/chapter/${chapter.slug}/discussion`}>Discuss this chapter</Link>
             </div>
           </div>
+          <ChapterDiscussion chapter={chapter} />
           <PrivateNote slug={chapter.slug} />
         </section>
 
@@ -152,5 +153,26 @@ function UnavailableChapter() {
       <p className="standalone-text">It may not be published yet, or the address may be mistyped. Nothing on this site links to unpublished chapters.</p>
       <Link className="btn btn-secondary" href="/"><Icon name="arrow-left" />Return to the library</Link>
     </main>
+  );
+}
+
+/**
+ * The bridge from a chapter into the wider community. It opens that chapter's
+ * own discussion — the same thread, whether it was opened from here or from
+ * the community — and points onward to everything else readers are discussing.
+ */
+function ChapterDiscussion({ chapter }: { chapter: Chapter }) {
+  return (
+    <section className="chapter-discussion" aria-labelledby="chapter-discussion-title">
+      <h2 id="chapter-discussion-title" className="meta-label">Community</h2>
+      <p className="chapter-discussion-text">
+        Chapter {chapterNumber(chapter.number)} has one discussion of its own, and readers write about it alongside
+        everything else in the book — theories, characters, the world, questions.
+      </p>
+      <div className="row-actions">
+        <Link className="btn btn-secondary" href={`/chapter/${chapter.slug}/discussion`}>Discuss this chapter</Link>
+        <Link className="btn btn-quiet" href={`/community/t/${chapterTag(chapter.number)}`}>Other threads tagged Chapter {chapterNumber(chapter.number)}</Link>
+      </div>
+    </section>
   );
 }

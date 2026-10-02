@@ -1,25 +1,33 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { getAdjacentChapters, getChapterBySlug } from './content/chapters';
 import { canonicalPathname, canonicalUrl } from './lib/seo';
 import { SiteHeader } from './components/SiteHeader';
 import { ReaderProvider, useReader } from './lib/reader';
+import { navigateTo } from './lib/navigation';
 import { LibraryPage } from './pages/LibraryPage';
 import { ChapterPage } from './pages/ChapterPage';
-import { DiscussionPage } from './pages/DiscussionPage';
-import { DiscussionsPage } from './pages/DiscussionsPage';
+import { CommunityPage } from './pages/CommunityPage';
+import { NewDiscussionPage } from './pages/NewDiscussionPage';
+import { ChapterThreadPage, ThreadPage } from './pages/ThreadPage';
 import { AccountPage } from './pages/AccountPage';
 import { ModerationPage } from './pages/ModerationPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 
-function currentPath() {
-  return window.location.pathname.replace(/\/+$/, '') || '/';
+/** The address bar is the only source of truth: query included, so a filtered or searched list is linkable. */
+function currentUrl() {
+  return `${window.location.pathname}${window.location.search}`;
 }
+
+type Filter = { category?: string; tag?: string; q?: string; scope?: string };
 
 type Route =
   | { name: 'library' }
   | { name: 'chapter'; slug: string }
-  | { name: 'discussion'; slug: string }
-  | { name: 'discussions' }
+  | { name: 'community'; filter: Filter }
+  | { name: 'new-discussion' }
+  | { name: 'thread'; id: string }
+  | { name: 'chapter-thread'; slug: string }
+  | { name: 'discussions-redirect' }
   | { name: 'account' }
   | { name: 'moderation' }
   | { name: 'not-found' };
@@ -32,16 +40,36 @@ function decode(s: string) {
   }
 }
 
-function matchRoute(path: string): Route {
+function matchRoute(rawPath: string, search: string): Route {
+  const path = rawPath.replace(/\/+$/, '') || '/';
   if (path === '/' || path === '/library') return { name: 'library' };
-  if (path === '/discussions') return { name: 'discussions' };
+  // The discussions index became the community; the address still resolves.
+  if (path === '/discussions') return { name: 'discussions-redirect' };
   if (path === '/account') return { name: 'account' };
   if (path === '/moderation') return { name: 'moderation' };
-  let m = path.match(/^\/chapter\/([^/]+)\/discussion$/);
-  if (m) return { name: 'discussion', slug: decode(m[1]) };
+  if (path === '/community') return { name: 'community', filter: readFilter(search) };
+  if (path === '/community/new') return { name: 'new-discussion' };
+  let m = path.match(/^\/community\/c\/([^/]+)$/);
+  if (m) return { name: 'community', filter: { category: decode(m[1]) } };
+  m = path.match(/^\/community\/t\/([^/]+)$/);
+  if (m) return { name: 'community', filter: { tag: decode(m[1]).toLowerCase() } };
+  m = path.match(/^\/community\/([^/]+)$/);
+  if (m) return { name: 'thread', id: decode(m[1]) };
+  m = path.match(/^\/chapter\/([^/]+)\/discussion$/);
+  if (m) return { name: 'chapter-thread', slug: decode(m[1]) };
   m = path.match(/^\/chapter\/([^/]+)$/);
   if (m) return { name: 'chapter', slug: decode(m[1]) };
   return { name: 'not-found' };
+}
+
+function readFilter(search: string): Filter {
+  const params = new URLSearchParams(search);
+  const filter: Filter = {};
+  for (const key of ['category', 'tag', 'q', 'scope'] as const) {
+    const value = params.get(key);
+    if (value) filter[key] = value;
+  }
+  return filter;
 }
 
 export default function App() {
@@ -53,17 +81,24 @@ export default function App() {
 }
 
 function Shell() {
-  const [pathname, setPathname] = useState(currentPath);
+  const [url, setUrl] = useState(currentUrl);
   const { prefs } = useReader();
-  const route = matchRoute(pathname);
-  const chapter = 'slug' in route ? getChapterBySlug(route.slug) : undefined;
+  const pathname = url.split('?')[0] || '/';
+  const search = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+  const route = useMemo(() => matchRoute(pathname, search), [pathname, search]);
   const slug = 'slug' in route ? route.slug : undefined;
+  const chapter = slug !== undefined ? getChapterBySlug(slug) : undefined;
 
   useEffect(() => {
-    const onPop = () => setPathname(currentPath());
+    const onPop = () => setUrl(currentUrl());
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
+
+  // Keep the address honest even where the edge cannot redirect (local dev).
+  useEffect(() => {
+    if (route.name === 'discussions-redirect') navigateTo('/community', { replace: true });
+  }, [route.name]);
 
   // Theme: resolve "auto" against the system, and keep it live.
   useEffect(() => {
@@ -82,23 +117,15 @@ function Shell() {
   }, [prefs.theme, prefs.fontSize, prefs.measure]);
 
   useEffect(() => {
-    const titles: Record<Route['name'], string> = {
-      library: 'Dusk Shingle — Reader’s library',
-      chapter: chapter ? `${chapter.title} — Dusk Shingle` : 'Chapter unavailable — Dusk Shingle',
-      discussion: chapter ? `Discussion: ${chapter.title} — Dusk Shingle` : 'Discussion — Dusk Shingle',
-      discussions: 'Discussions — Dusk Shingle',
-      account: 'Account — Dusk Shingle',
-      moderation: 'Moderation — Dusk Shingle',
-      'not-found': 'Not found — Dusk Shingle',
-    };
-    document.title = titles[route.name];
-  }, [route.name, chapter]);
+    document.title = titleFor(route, chapter);
+  }, [route, chapter]);
 
   // SEO: one canonical URL per indexable public page (kept consistent with
   // sitemap.xml); account, moderation, unknown chapters and not-found carry a
   // noindex meta and no canonical URL.
   useEffect(() => {
-    const path = canonicalPathname({ name: route.name, slug, chapter });
+    const filtered = 'filter' in route && Object.keys(route.filter).length > 0;
+    const path = canonicalPathname({ name: route.name, slug, chapter, filtered });
 
     let link = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
     if (path) {
@@ -123,7 +150,7 @@ function Shell() {
       }
       meta.content = 'noindex';
     }
-  }, [route.name, slug, chapter]);
+  }, [route, slug, chapter]);
 
   let page;
   switch (route.name) {
@@ -133,8 +160,11 @@ function Shell() {
       page = <ChapterPage chapter={chapter} previous={adjacent.previous} next={adjacent.next} />;
       break;
     }
-    case 'discussion': page = <DiscussionPage chapter={chapter} />; break;
-    case 'discussions': page = <DiscussionsPage />; break;
+    case 'community': page = <CommunityPage filter={route.filter} />; break;
+    case 'new-discussion': page = <NewDiscussionPage />; break;
+    case 'thread': page = <ThreadPage id={route.id} />; break;
+    case 'chapter-thread': page = <ChapterThreadPage chapter={chapter} />; break;
+    case 'discussions-redirect': page = <CommunityPage filter={{}} />; break;
     case 'account': page = <AccountPage />; break;
     case 'moderation': page = <ModerationPage />; break;
     default: page = <NotFoundPage />;
@@ -147,4 +177,19 @@ function Shell() {
       {page}
     </div>
   );
+}
+
+function titleFor(route: Route, chapter?: { title: string }): string {
+  switch (route.name) {
+    case 'library': return 'Dusk Shingle — Reader’s library';
+    case 'chapter': return chapter ? `${chapter.title} — Dusk Shingle` : 'Chapter unavailable — Dusk Shingle';
+    case 'community': return 'Community — Dusk Shingle';
+    case 'new-discussion': return 'Start a discussion — Dusk Shingle';
+    case 'thread': return 'Discussion — Dusk Shingle';
+    case 'chapter-thread': return chapter ? `Discussion: ${chapter.title} — Dusk Shingle` : 'Discussion — Dusk Shingle';
+    case 'discussions-redirect': return 'Community — Dusk Shingle';
+    case 'account': return 'Account — Dusk Shingle';
+    case 'moderation': return 'Moderation — Dusk Shingle';
+    default: return 'Not found — Dusk Shingle';
+  }
 }
